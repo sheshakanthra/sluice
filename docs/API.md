@@ -42,6 +42,7 @@ Send it as `Authorization: Bearer <token>`. Every token has `iss=sluice`, `iat`,
 | `SOLD_OUT` | 409 | |
 | `HOLD_LIMIT` | 409 | The user already has an active hold for this event |
 | `HOLD_EXPIRED` | 409 | The hold expired or was reclaimed |
+| `REJOIN_LIMIT` | 409 | `POST /queue?rejoin=true` after the 2 allowed rejoins (ADR 0008) |
 | `ORDER_STATE` | 409 | Action not allowed in the current order state |
 | `REQUEST_IN_PROGRESS` | 409 | Concurrent request with the same IK |
 | `QUOTA_EXCEEDED` | 422 | Would exceed `max_per_user` |

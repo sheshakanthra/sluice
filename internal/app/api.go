@@ -28,6 +28,7 @@ import (
 	"github.com/sheshakanthra/sluice/internal/jobs"
 	"github.com/sheshakanthra/sluice/internal/obs"
 	"github.com/sheshakanthra/sluice/internal/orders"
+	"github.com/sheshakanthra/sluice/internal/queue"
 	"github.com/sheshakanthra/sluice/internal/redisx"
 )
 
@@ -71,8 +72,12 @@ func APIHandler(ctx context.Context, d Deps) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
+	sc, err := newScripts(ctx, d.Log, d.Registry, d.Redis)
+	if err != nil {
+		return nil, err
+	}
 	var ord *orders.Service // the reclaim hook needs the orders service, which needs inventory
-	inv, err := newInventory(ctx, d.Config, d.Log, d.Registry, d.PG, d.Redis,
+	inv, err := newInventory(d.Config, d.Log, d.Registry, d.PG, d.Redis, sc,
 		func(ctx context.Context, tx pgx.Tx, hid uuid.UUID) error { return ord.OnReclaim(ctx, tx, hid) })
 	if err != nil {
 		return nil, err
@@ -118,6 +123,13 @@ func APIHandler(ctx context.Context, d Deps) (http.Handler, error) {
 		Idem:          idem,
 		QueueEnforced: d.Config.QueueEnforced, AdminToken: d.Config.AdminToken, Log: d.Log,
 	})
+	qsvc, err := newQueueService(d.Config, d.Log, d.Registry, sc, keyring)
+	if err != nil {
+		return nil, err
+	}
+	// The snapshot refresher lives as long as the process context.
+	go func() { _ = qsvc.Cache().Run(ctx, queueSnapshotInterval) }()
+	queue.RegisterRoutes(rt, queue.HandlerDeps{Svc: qsvc, Events: inv, Keys: keyring, Log: d.Log})
 	orders.RegisterRoutes(rt, orders.HandlerDeps{
 		Svc: ord, Keys: keyring, Idem: idem, QueueEnforced: d.Config.QueueEnforced,
 		AdminToken: d.Config.AdminToken, WebhookSecret: d.Config.MockpayWebhookSecret, Log: d.Log,

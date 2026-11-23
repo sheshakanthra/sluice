@@ -63,3 +63,44 @@ func RebuildLock(eid uuid.UUID) string { return k(eid, "rebuild_lock") }
 // Audit is the live audit cache hash (oversold, duplicates, orphans,
 // tickets, at_ms), refreshed every 5 s by the worker (P3, read by /stats).
 func Audit(eid uuid.UUID) string { return k(eid, "audit") }
+
+// QPre is the pre-queue lottery ZSET uid -> random score.
+func QPre(eid uuid.UUID) string { return k(eid, "q:pre") }
+
+// QUser is a user's queue entry: "<pre|ticket>:<rejoins>".
+func QUser(eid, uid uuid.UUID) string { return k(eid, "q:user:"+uid.String()) }
+
+// QRateAt is the ms timestamp of the last admit-rate update (q:rate's clock).
+func QRateAt(eid uuid.UUID) string { return k(eid, "q:rate_at") }
+
+// QueueJoinKeys are queue_join.lua's KEYS, in order.
+func QueueJoinKeys(eid, uid uuid.UUID) []string {
+	return []string{QUser(eid, uid), QPre(eid), QPreSize(eid), QTail(eid), QSoldOut(eid), QCursor(eid), QOffers(eid), QActive(eid)}
+}
+
+// QueueResolveKeys are queue_resolve.lua's KEYS, in order.
+func QueueResolveKeys(eid, uid uuid.UUID) []string {
+	return []string{QUser(eid, uid), QPre(eid), QPreSize(eid)}
+}
+
+// QueueClaimKeys are queue_claim.lua's KEYS, in order.
+func QueueClaimKeys(eid uuid.UUID) []string {
+	return []string{QSoldOut(eid), QCursor(eid), QOffers(eid), QActive(eid)}
+}
+
+// QueueLeaveKeys are queue_leave.lua's KEYS, in order.
+func QueueLeaveKeys(eid, uid uuid.UUID) []string {
+	return []string{QActive(eid), QUser(eid, uid), QOffers(eid), QPre(eid), QPreSize(eid)}
+}
+
+// QueueTickKeys are queue_tick.lua's KEYS, in order.
+func QueueTickKeys(eid uuid.UUID) []string {
+	return []string{Meta(eid), Avail(eid), Holds(eid), Holding(eid), QPre(eid), QPreSize(eid), QTail(eid),
+		QCursor(eid), QOffers(eid), QActive(eid), QSoldOut(eid), QRate(eid), QRateAt(eid)}
+}
+
+// SnapshotKeys are snapshot.lua's KEYS, in order.
+func SnapshotKeys(eid uuid.UUID) []string {
+	return []string{QCursor(eid), QPreSize(eid), QTail(eid), QSoldOut(eid), Avail(eid), Holds(eid),
+		Sold(eid), Ver(eid), QRate(eid), QOffers(eid), QActive(eid)}
+}

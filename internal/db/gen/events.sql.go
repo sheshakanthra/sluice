@@ -288,3 +288,24 @@ func (q *Queries) SetEventStatus(ctx context.Context, arg SetEventStatusParams) 
 	}
 	return result.RowsAffected(), nil
 }
+
+const transitionEventStatus = `-- name: TransitionEventStatus :execrows
+UPDATE events SET status = $1
+WHERE id = $2 AND status::text = ANY($3::text[])
+`
+
+type TransitionEventStatusParams struct {
+	ToStatus     EventStatus
+	ID           uuid.UUID
+	FromStatuses []string
+}
+
+// Admission controller (P4): move an event forward only from an expected
+// status, so concurrent controllers and admin re-timing never fight.
+func (q *Queries) TransitionEventStatus(ctx context.Context, arg TransitionEventStatusParams) (int64, error) {
+	result, err := q.db.Exec(ctx, transitionEventStatus, arg.ToStatus, arg.ID, arg.FromStatuses)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}

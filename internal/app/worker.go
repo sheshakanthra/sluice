@@ -26,8 +26,9 @@ const idempotencyGCInterval = time.Hour
 // event whose Redis inventory is missing, so start-up loads every open
 // event, and settles the orders of reclaimed holds), the River jobs
 // (process_webhook, capture/void/refund, the periodic reconciler and live
-// audit cache), the idempotency-key GC, and a health/metrics server on
-// WORKER_HTTP_ADDR. Admission ticks arrive in P4.
+// audit cache), the idempotency-key GC, the queue admission controller
+// (one queue_tick loop per open event every QUEUE_TICK), and a
+// health/metrics server on WORKER_HTTP_ADDR.
 func RunWorker(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	log = log.With(slog.String("svc", "worker"))
 
@@ -48,8 +49,12 @@ func RunWorker(ctx context.Context, cfg *config.Config, log *slog.Logger) error 
 	defer func() { _ = rdb.Close() }()
 
 	reg := obs.NewRegistry()
+	sc, err := newScripts(ctx, log, reg, rdb)
+	if err != nil {
+		return fmt.Errorf("worker: %w", err)
+	}
 	var ord *orders.Service // the reclaim hook needs the orders service, which needs inventory
-	inv, err := newInventory(ctx, cfg, log, reg, pg, rdb,
+	inv, err := newInventory(cfg, log, reg, pg, rdb, sc,
 		func(ctx context.Context, tx pgx.Tx, hid uuid.UUID) error { return ord.OnReclaim(ctx, tx, hid) })
 	if err != nil {
 		return fmt.Errorf("worker: %w", err)
@@ -62,6 +67,11 @@ func RunWorker(ctx context.Context, cfg *config.Config, log *slog.Logger) error 
 		return fmt.Errorf("worker: %w", err)
 	}
 	rc, err := jobs.NewWorkerClient(pg, ord, jobs.Config{ReconcileInterval: cfg.ReconcileInterval, Log: log})
+	if err != nil {
+		return fmt.Errorf("worker: %w", err)
+	}
+
+	ctrl, err := newQueueController(cfg, log, gen.New(pg), sc)
 	if err != nil {
 		return fmt.Errorf("worker: %w", err)
 	}
@@ -79,6 +89,7 @@ func RunWorker(ctx context.Context, cfg *config.Config, log *slog.Logger) error 
 	g.Go(func() error { return httpx.Serve(gctx, srv, log, nil) })
 	g.Go(func() error { return inv.RunSweeper(gctx, cfg.SweeperInterval) })
 	g.Go(func() error { return runIdempotencyGC(gctx, gen.New(pg), log) })
+	g.Go(func() error { return ctrl.Run(gctx) })
 	g.Go(func() error {
 		if err := rc.Start(gctx); err != nil {
 			return fmt.Errorf("river start: %w", err)
@@ -95,7 +106,7 @@ func RunWorker(ctx context.Context, cfg *config.Config, log *slog.Logger) error 
 		g.Go(func() error { return httpx.Serve(gctx, ps, log.With(slog.String("server", "pprof")), nil) })
 	}
 	log.InfoContext(ctx, "worker started", slog.Duration("sweeper_interval", cfg.SweeperInterval),
-		slog.Duration("reconcile_interval", cfg.ReconcileInterval),
+		slog.Duration("reconcile_interval", cfg.ReconcileInterval), slog.Duration("queue_tick", cfg.QueueTick),
 		slog.String("hold_path", string(cfg.HoldPath)))
 	if err := g.Wait(); err != nil {
 		return fmt.Errorf("worker: %w", err)

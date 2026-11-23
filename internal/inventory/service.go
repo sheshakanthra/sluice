@@ -230,6 +230,7 @@ type EventInfo struct {
 	MaxPerUser  int32
 	PricePaise  int64
 	SaleOpensAt time.Time
+	StartsAt    time.Time
 	Status      gen.EventStatus
 	labels      []string
 }
@@ -302,7 +303,7 @@ func (c *eventCache) get(ctx context.Context, idOrSlug string) (*EventInfo, erro
 		return nil, fmt.Errorf("get event: %w", err)
 	}
 	ev := &EventInfo{ID: row.ID, Slug: row.Slug, Capacity: row.Capacity, MaxPerUser: row.MaxPerUser,
-		PricePaise: row.PricePaise, SaleOpensAt: row.SaleOpensAt.UTC(), Status: row.Status}
+		PricePaise: row.PricePaise, SaleOpensAt: row.SaleOpensAt.UTC(), StartsAt: row.StartsAt.UTC(), Status: row.Status}
 	var l events.Layout
 	if err := json.Unmarshal(row.Layout, &l); err == nil {
 		seats := l.Seats()

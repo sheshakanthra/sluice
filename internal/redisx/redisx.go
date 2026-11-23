@@ -43,9 +43,17 @@ const (
 	InventoryLoad   = "inventory_load"
 	InventoryRepair = "inventory_repair"
 	Snapshot        = "snapshot"
+	QueueJoin       = "queue_join"
+	QueueResolve    = "queue_resolve"
+	QueueClaim      = "queue_claim"
+	QueueLeave      = "queue_leave"
+	QueueTick       = "queue_tick"
 )
 
-var scriptNames = []string{HoldSeats, HoldBest, HoldExtend, HoldConsume, HoldRelease, InventoryLoad, InventoryRepair, Snapshot}
+var scriptNames = []string{
+	HoldSeats, HoldBest, HoldExtend, HoldConsume, HoldRelease, InventoryLoad, InventoryRepair, Snapshot,
+	QueueJoin, QueueResolve, QueueClaim, QueueLeave, QueueTick,
+}
 
 // Scripts is the set of loaded scripts plus their latency histogram.
 type Scripts struct {

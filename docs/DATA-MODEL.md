@@ -284,11 +284,12 @@ Every per-event key carries the hash tag `{e:<eid>}`, so it's cluster-safe and L
 | `sl:{e:<eid>}:q:presize` | INT | ZCARD(pre), frozen at T0 (SET NX) |
 | `sl:{e:<eid>}:q:tail` | INT | post-T0 join counter |
 | `sl:{e:<eid>}:q:cursor` | INT | highest ticket offered |
-| `sl:{e:<eid>}:q:user:<uid>` | STRING | `pre` or the ticket number; also stores rejoin count |
+| `sl:{e:<eid>}:q:user:<uid>` | STRING | `<pre\|ticket>:<rejoins>`, e.g. `pre:0` or `41234:1` (ADR 0008) |
 | `sl:{e:<eid>}:q:offers` | ZSET | ticket → claim deadline ms |
 | `sl:{e:<eid>}:q:active` | ZSET | uid → admission expiry ms |
 | `sl:{e:<eid>}:q:soldout` | STRING | `1` once sold out |
-| `sl:{e:<eid>}:q:rate` | STRING | admit_rate_ema (written by tick) |
+| `sl:{e:<eid>}:q:rate` | STRING | admit_rate_ema in admissions/s, a time-decayed counter `rate·e^(−dt/τ) + k/τ`, τ = 5 s (written by tick) |
+| `sl:{e:<eid>}:q:rate_at` | STRING | ms timestamp of the last `q:rate` update |
 | `sl:{e:<eid>}:audit` | HASH | live audit cache (oversold, dup, orphan, at_ms), written by the worker every 5 s |
 | `sl:{e:<eid>}:demo` | HASH | demo-rush metrics (bots, rps, p95s), demo mode only |
 | `sl:rl:*` | — | redis_rate GCRA keys |
@@ -308,11 +309,11 @@ Hold ids are deterministic: `hid = UUIDv5(NS_HOLD, user_id || ':' || idempotency
 | `hold_consume.lua` | hid | SADD sold seats; SREM avail seats; DEL hold; ZREM holds; SREM holding uid; INCR ver. If missing: ZREM holds only | `OK seats_csv` \| `MISSING` (idempotent) |
 | `hold_release.lua` | hid | If present (consumed holds are already deleted): SADD avail every seat not in `sold`; DEL; ZREM; SREM holding; INCR ver. If missing: ZREM holds only | `OK seats_csv` \| `MISSING` (idempotent) |
 | `inventory_repair.lua` | prefix, n, hid × n, then (seat, `A`\|`H`\|`S`)... | Forget n holds without touching avail (DEL hash, ZREM, SREM holding uid), then set each seat to PG's state: A → in avail; H → in neither set; S → in sold. INCR ver. Used after a compensation (seats PG says are taken) and after a PG takeover (ADR 0006) | `OK` |
-| `queue_join.lua` | uid, now_ms, sale_opens_ms, rand_score, rejoin(0/1), max_rejoins | Existing entry and not a rejoin → return it. Sold out → SOLD_OUT. If now ≥ open and presize unset → freeze. Pre path: ZADD pre NX. Post path: ticket = presize + INCR tail | `PRE` \| `TICKET n` \| `SOLD_OUT` \| `REJOIN_LIMIT` |
-| `queue_resolve.lua` | uid | ZRANK pre uid + 1 → store it as the user's ticket | `TICKET n` \| `NOT_FOUND` |
-| `queue_claim.lua` | ticket, uid, now_ms, admission_ttl_ms | Sold out → SOLD_OUT. uid already active → ADMITTED (idempotent). Offer missing or expired → OFFER_EXPIRED. Otherwise ZREM offers, ZADD active | `ADMITTED exp` \| `OFFER_EXPIRED` \| `SOLD_OUT` |
-| `queue_leave.lua` | uid | ZREM active; DEL user entry | `OK` |
-| `queue_tick.lua` | now_ms, max_active, overadmit, min_admit, max_per_tick, offer_ttl_ms | The algorithm in ARCHITECTURE §5 | `PREQUEUE` \| `PAUSED` \| `SOLD_OUT` \| `ADMITTING k` |
+| `queue_join.lua` | uid, now_ms, sale_opens_ms, rand_score, rejoin(0/1), max_rejoins | If now ≥ open and presize unset → freeze. An existing pre entry is resolved to its lottery ticket once frozen. Existing entry and not a rejoin → return it. Sold out → SOLD_OUT. Rejoin: honoured only after OFFER_EXPIRED (ticket ≤ cursor, offer gone or past its deadline, user not active), else the current entry is returned; past max_rejoins → REJOIN_LIMIT. Pre path (only while presize is **unset**): ZADD pre NX. Post path: ticket = presize + INCR tail (ADR 0008) | `PRE` \| `TICKET n` \| `SOLD_OUT` \| `REJOIN_LIMIT` |
+| `queue_resolve.lua` | uid | ZRANK pre uid + 1 → store it as the user's ticket (idempotent). presize unset → PENDING | `TICKET n` \| `PENDING` \| `NOT_FOUND` |
+| `queue_claim.lua` | ticket, uid, now_ms, admission_ttl_ms | Sold out → SOLD_OUT. uid already active → ADMITTED (idempotent). ticket > cursor → WAITING. Offer missing or expired → OFFER_EXPIRED. Otherwise ZREM offers, ZADD active | `ADMITTED exp` \| `OFFER_EXPIRED` \| `SOLD_OUT` \| `WAITING` |
+| `queue_leave.lua` | uid, ticket (0 = none) | ZREM active; DEL user entry; ZREM offers ticket; before the freeze also ZREM pre uid | `OK` |
+| `queue_tick.lua` | now_ms, sale_opens_ms, max_active, overadmit, min_admit, max_per_tick, offer_ttl_ms, rate_tau_ms | `meta.loaded` ≠ 1 → NOT_LOADED (never mistaken for sold out). Otherwise the algorithm in ARCHITECTURE §5 | `NOT_LOADED` \| `PREQUEUE` \| `PAUSED` \| `SOLD_OUT` \| `ADMITTING k target seeking outstanding expired_offers` |
 | `snapshot.lua` | — | One read of cursor, presize, tail, soldout, SCARD avail, ZCARD holds, SCARD sold, ver, rate, ZCARD offers, ZCARD active | array |
 | `inventory_load.lua` | prefix, now_ms, fence_floor, capacity, max_per_user, sale_opens_ms, price, status, n_avail, avail..., n_sold, sold..., then per live hold: hid, uid, exp_ms, fence, state, seats_csv | Delete the old hold hashes, meta, avail, sold, holds and holding; SADD avail and sold (chunks of 5,000); recreate each hold hash, its ZADD and its holding entry; fence = max(current, fence_floor); ver = max(current + 1, now_ms); HSET meta last, with loaded=1 (used by rebuild) | `OK` |
 

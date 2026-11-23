@@ -42,6 +42,12 @@ WHERE id = @id;
 -- name: SetEventStatus :execrows
 UPDATE events SET status = @status WHERE id = @id;
 
+-- name: TransitionEventStatus :execrows
+-- Admission controller (P4): move an event forward only from an expected
+-- status, so concurrent controllers and admin re-timing never fight.
+UPDATE events SET status = @to_status
+WHERE id = @id AND status::text = ANY(@from_statuses::text[]);
+
 -- name: ListOpenEvents :many
 -- Events whose inventory the worker keeps loaded and swept.
 SELECT id, capacity, max_per_user, price_paise, sale_opens_at, status FROM events

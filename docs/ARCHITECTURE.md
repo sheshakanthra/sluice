@@ -154,22 +154,26 @@ Runs in the worker every `QUEUE_TICK` (100 ms) as **one atomic Lua script per ev
 
 ```
 queue_tick(now):
-  if now < sale_opens_at: return PREQUEUE
-  if presize not set: presize = ZCARD(pre)             # freeze the lottery (joins may also freeze it)
+  if meta.loaded != 1: return NOT_LOADED               # empty inventory must not read as sold out
+  if presize not set:
+    if now < sale_opens_at: return PREQUEUE
+    presize = ZCARD(pre)                               # freeze the lottery (joins may also freeze it;
+                                                       # after the freeze no join takes the pre path)
   ZREMRANGEBYSCORE offers -inf now                     # expired offers give their permits back
   ZREMRANGEBYSCORE active -inf now                     # expired shoppers leave
   if soldout: return SOLD_OUT
   avail = SCARD avail; held = ZCARD holds
   if avail == 0 and held == 0: SET soldout 1; return SOLD_OUT
   if avail == 0: return PAUSED                          # everything is held; wait for expiries
-  seeking     = max(0, ZCARD active - SCARD holding)
+  seeking     = ZCARD active - ZINTERCARD(active, holding)   # admitted users holding nothing
   outstanding = ZCARD offers
   target      = min(QUEUE_MAX_ACTIVE, max(QUEUE_MIN_ADMIT, ceil(avail * QUEUE_OVERADMIT)))
   k = clamp(target - seeking - outstanding, 0, min(QUEUE_MAX_ADMIT_PER_TICK, presize + tail - cursor))
   for t in cursor+1 .. cursor+k: ZADD offers (now + OFFER_CLAIM_TTL) t
   INCRBY cursor k
-  update admit_rate_ema; return ADMITTING(k)
+  update admit_rate_ema; return ADMITTING(k)          # ema: rate*e^(-dt/5s) + k/5s, per second
 ```
+The worker runs one tick loop per non-CLOSED event and moves the event's PG status SCHEDULED → ON_SALE on the first admitting/paused tick and → SOLD_OUT when the tick sets the flag (conditional update; ADR 0008).
 Every second the worker also writes `queue_snapshots`, used by R1.
 
 **Status math** (API, in memory):
