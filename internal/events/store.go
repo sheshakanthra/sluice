@@ -16,8 +16,8 @@ import (
 // ErrEventNotFound is returned when no event matches an id or slug.
 var ErrEventNotFound = errors.New("event not found")
 
-// Counts are seat counts by state. In P1 they come straight from Postgres;
-// P2 replaces them with live counts from Redis.
+// Counts are seat counts by state: live counts from the availability cache
+// when a LiveCounter is set (P2), Postgres counts otherwise.
 type Counts struct {
 	Available int32 `json:"available"`
 	Held      int32 `json:"held"`
@@ -48,13 +48,35 @@ type EventDetail struct {
 	Layout json.RawMessage `json:"layout"`
 }
 
+// LiveCounter returns live seat counts for an event (the inventory
+// availability cache). An error falls back to the Postgres counts.
+type LiveCounter func(ctx context.Context, eventID uuid.UUID) (Counts, error)
+
 // Store reads events from Postgres.
 type Store struct {
-	q *gen.Queries
+	q    *gen.Queries
+	live LiveCounter
 }
 
 // NewStore wraps generated queries (a pool or a transaction).
 func NewStore(q *gen.Queries) *Store { return &Store{q: q} }
+
+// WithLiveCounts makes List and Get serve live counts from f.
+func (s *Store) WithLiveCounts(f LiveCounter) *Store {
+	s.live = f
+	return s
+}
+
+func (s *Store) counts(ctx context.Context, id uuid.UUID, pg Counts) Counts {
+	if s.live == nil {
+		return pg
+	}
+	c, err := s.live(ctx, id)
+	if err != nil {
+		return pg
+	}
+	return c
+}
 
 // List returns every event with its seat counts, by sale time.
 func (s *Store) List(ctx context.Context) ([]Event, error) {
@@ -69,7 +91,7 @@ func (s *Store) List(ctx context.Context) ([]Event, error) {
 			ID: r.ID, Slug: r.Slug, Name: r.Name, Venue: r.Venue, Status: string(r.Status),
 			StartsAt: r.StartsAt.UTC(), PrequeueOpensAt: r.PrequeueOpensAt.UTC(), SaleOpensAt: r.SaleOpensAt.UTC(),
 			Capacity: r.Capacity, PricePaise: r.PricePaise, Currency: "INR", MaxPerUser: r.MaxPerUser,
-			Counts: Counts{Available: r.Available, Held: r.Held, Sold: r.Sold, Capacity: r.Capacity},
+			Counts: s.counts(ctx, r.ID, Counts{Available: r.Available, Held: r.Held, Sold: r.Sold, Capacity: r.Capacity}),
 		})
 	}
 	return out, nil
@@ -103,7 +125,7 @@ func (s *Store) Get(ctx context.Context, idOrSlug string) (EventDetail, error) {
 			ID: ev.ID, Slug: ev.Slug, Name: ev.Name, Venue: ev.Venue, Status: string(ev.Status),
 			StartsAt: ev.StartsAt.UTC(), PrequeueOpensAt: ev.PrequeueOpensAt.UTC(), SaleOpensAt: ev.SaleOpensAt.UTC(),
 			Capacity: ev.Capacity, PricePaise: ev.PricePaise, Currency: "INR", MaxPerUser: ev.MaxPerUser,
-			Counts: Counts{Available: c.Available, Held: c.Held, Sold: c.Sold, Capacity: ev.Capacity},
+			Counts: s.counts(ctx, ev.ID, Counts{Available: c.Available, Held: c.Held, Sold: c.Sold, Capacity: ev.Capacity}),
 		},
 		Layout: json.RawMessage(ev.Layout),
 	}, nil

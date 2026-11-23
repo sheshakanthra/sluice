@@ -57,6 +57,11 @@ tasks:
     cmds:
       - go run -ldflags "{{.LDFLAGS}}" ./cmd/sluice api
 
+  dev:worker:
+    desc: "Run the worker locally: hold sweeper (SWEEPER_INTERVAL), Redis inventory loader, health/metrics on WORKER_HTTP_ADDR"
+    cmds:
+      - go run -ldflags "{{.LDFLAGS}}" ./cmd/sluice worker
+
   gen:
     desc: "sqlc generate: db/queries + db/migrations -> internal/db/gen (Docker)"
     cmds:
@@ -135,9 +140,6 @@ tasks:
       - pnpm --dir web typecheck
 
   # ---------- later phases (stubs) ----------
-  dev:worker:
-    desc: "TODO(P2) run the worker locally"
-    cmds: ["echo 'TODO(P2) - sluice worker is not implemented yet' && exit 1"]
   dev:mockpay:
     desc: "TODO(P3) run MockPay locally"
     cmds: ["echo 'TODO(P3) - sluice mockpay is not implemented yet' && exit 1"]

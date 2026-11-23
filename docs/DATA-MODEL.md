@@ -258,7 +258,8 @@ Every per-event key carries the hash tag `{e:<eid>}`, so it's cluster-safe and L
 | `sl:{e:<eid>}:holds` | ZSET | hid → exp_ms (sweeper index) |
 | `sl:{e:<eid>}:holding` | SET\<uid\> | users who currently hold seats |
 | `sl:{e:<eid>}:fence` | INT | monotonic fence counter |
-| `sl:{e:<eid>}:ver` | INT | seat-map version (bumps on every seat change) |
+| `sl:{e:<eid>}:ver` | INT | seat-map version (bumps on every seat change; a rebuild sets it to at least `now_ms`, so it never repeats after a flush) |
+| `sl:{e:<eid>}:rebuild_lock` | STRING | `SET NX PX 30000` token: one process rebuilds an event at a time (§6, ADR 0006) |
 | `sl:{e:<eid>}:q:pre` | ZSET | uid → random score (pre-queue lottery) |
 | `sl:{e:<eid>}:q:presize` | INT | ZCARD(pre), frozen at T0 (SET NX) |
 | `sl:{e:<eid>}:q:tail` | INT | post-T0 join counter |
@@ -275,25 +276,28 @@ Every per-event key carries the hash tag `{e:<eid>}`, so it's cluster-safe and L
 Redis config: `appendonly yes`, `appendfsync everysec`, **`maxmemory-policy noeviction`** (a silent eviction would be data loss; writes must fail loudly instead).
 
 ## 5. Lua script contracts (`internal/redisx/scripts/`)
-Every script is atomic and idempotent where noted, and returns a status string first. The Go side passes **all** randomness and time in through ARGV; scripts never read the clock or call math.random.
+Every script is atomic and idempotent where noted, and returns a status string first. The Go side passes **all** randomness and time in through ARGV; scripts never read the clock or call math.random (the one exception is `SPOP` in `hold_best`; scripts replicate as effects). Key names come only from `internal/redisx/keys`, and every script declares its keys in KEYS. The two that touch hold hashes by id (`inventory_load`, `inventory_repair`) build those names from the event prefix, which carries the same hash tag, so they stay in one slot. Every script has a direct test against Redis 8 (`internal/redisx/scripts_test.go`).
+
+Hold ids are deterministic: `hid = UUIDv5(NS_HOLD, user_id || ':' || idempotency_key)` with `NS_HOLD = UUIDv5(NameSpaceURL, "https://sluice.dev/ns/hold")`. Expiries are whole milliseconds, so Redis `exp_ms`, PG `holds.expires_at` and `seats.held_until` are the same instant.
 
 | Script | Input (ARGV) | Effect | Returns |
 |---|---|---|---|
-| `hold_seats.lua` | hid, uid, now_ms, ttl_ms, seat... | If the hold exists → REPLAY. If `q:soldout` is set → SOLD_OUT. If uid is already in `holding` → HOLD_LIMIT. If any seat isn't in `avail` → TAKEN with the list. Otherwise SREM avail, INCR fence, HSET hold, ZADD holds, SADD holding, INCR ver. (The per-user quota is pre-checked in PG by the API and enforced at confirm.) | `OK fence exp` \| `REPLAY ...` \| `TAKEN s...` \| `HOLD_LIMIT` \| `SOLD_OUT` |
-| `hold_best.lua` | hid, uid, now_ms, ttl_ms, qty | Same guards. If SCARD(avail) < qty → INSUFFICIENT n. Otherwise SPOP avail qty, then the same bookkeeping | `OK fence exp seats...` \| `INSUFFICIENT n` \| ... |
-| `hold_extend.lua` | hid, new_exp_ms | Set state=PAYMENT and the new exp; ZADD holds | `OK` \| `MISSING` |
-| `hold_consume.lua` | hid | SADD sold seats; DEL hold; ZREM holds; SREM holding uid; INCR ver | `OK` \| `MISSING` (idempotent) |
-| `hold_release.lua` | hid | If present and not consumed: SADD avail seats; DEL; ZREM; SREM holding; INCR ver | `OK` \| `MISSING` (idempotent) |
+| `hold_seats.lua` | hid, uid, now_ms, ttl_ms, seat... | If the hold exists → REPLAY. If `meta.loaded` ≠ 1 → NOT_LOADED (the API rebuilds the event, then retries once). If `q:soldout` is set → SOLD_OUT. If uid is already in `holding` → HOLD_LIMIT. If any seat isn't in `avail` → TAKEN with the list. Otherwise SREM avail, INCR fence, HSET hold, PEXPIREAT exp + 10 min, ZADD holds, SADD holding, INCR ver. (The per-user quota is pre-checked in PG inside the hold transaction, after the grant, and enforced at confirm; ADR 0006.) | `OK fence exp` \| `REPLAY fence exp seats_csv uid` \| `TAKEN s...` \| `HOLD_LIMIT` \| `SOLD_OUT` \| `NOT_LOADED` |
+| `hold_best.lua` | hid, uid, now_ms, ttl_ms, qty | Same guards. If SCARD(avail) < qty → INSUFFICIENT n. Otherwise SPOP avail qty (sorted), then the same bookkeeping | `OK fence exp seats...` \| `INSUFFICIENT n` \| ... |
+| `hold_extend.lua` | hid, new_exp_ms | Set state=PAYMENT and the new exp; PEXPIREAT; ZADD holds | `OK` \| `MISSING` |
+| `hold_consume.lua` | hid | SADD sold seats; SREM avail seats; DEL hold; ZREM holds; SREM holding uid; INCR ver. If missing: ZREM holds only | `OK seats_csv` \| `MISSING` (idempotent) |
+| `hold_release.lua` | hid | If present (consumed holds are already deleted): SADD avail every seat not in `sold`; DEL; ZREM; SREM holding; INCR ver. If missing: ZREM holds only | `OK seats_csv` \| `MISSING` (idempotent) |
+| `inventory_repair.lua` | prefix, n, hid × n, then (seat, `A`\|`H`\|`S`)... | Forget n holds without touching avail (DEL hash, ZREM, SREM holding uid), then set each seat to PG's state: A → in avail; H → in neither set; S → in sold. INCR ver. Used after a compensation (seats PG says are taken) and after a PG takeover (ADR 0006) | `OK` |
 | `queue_join.lua` | uid, now_ms, sale_opens_ms, rand_score, rejoin(0/1), max_rejoins | Existing entry and not a rejoin → return it. Sold out → SOLD_OUT. If now ≥ open and presize unset → freeze. Pre path: ZADD pre NX. Post path: ticket = presize + INCR tail | `PRE` \| `TICKET n` \| `SOLD_OUT` \| `REJOIN_LIMIT` |
 | `queue_resolve.lua` | uid | ZRANK pre uid + 1 → store it as the user's ticket | `TICKET n` \| `NOT_FOUND` |
 | `queue_claim.lua` | ticket, uid, now_ms, admission_ttl_ms | Sold out → SOLD_OUT. uid already active → ADMITTED (idempotent). Offer missing or expired → OFFER_EXPIRED. Otherwise ZREM offers, ZADD active | `ADMITTED exp` \| `OFFER_EXPIRED` \| `SOLD_OUT` |
 | `queue_leave.lua` | uid | ZREM active; DEL user entry | `OK` |
 | `queue_tick.lua` | now_ms, max_active, overadmit, min_admit, max_per_tick, offer_ttl_ms | The algorithm in ARCHITECTURE §5 | `PREQUEUE` \| `PAUSED` \| `SOLD_OUT` \| `ADMITTING k` |
 | `snapshot.lua` | — | One read of cursor, presize, tail, soldout, SCARD avail, ZCARD holds, SCARD sold, ver, rate, ZCARD offers, ZCARD active | array |
-| `inventory_load.lua` | capacity, avail..., sold... | Reset the event's inventory keys from the provided state (used by rebuild) | `OK` |
+| `inventory_load.lua` | prefix, now_ms, fence_floor, capacity, max_per_user, sale_opens_ms, price, status, n_avail, avail..., n_sold, sold..., then per live hold: hid, uid, exp_ms, fence, state, seats_csv | Delete the old hold hashes, meta, avail, sold, holds and holding; SADD avail and sold (chunks of 5,000); recreate each hold hash, its ZADD and its holding entry; fence = max(current, fence_floor); ver = max(current + 1, now_ms); HSET meta last, with loaded=1 (used by rebuild) | `OK` |
 
 ## 6. Rebuild procedures (R1)
-- **Inventory rebuild** (admin endpoint, plus automatically when the worker sees `meta.loaded` missing): read `seats` and active holds from PG. avail = AVAILABLE seats plus HELD seats whose `held_until < now()` (these get reclaimed in PG first). sold = SOLD. Recreate the hold hashes and the `holds` ZSET from PG holds, then `inventory_load.lua`. Throughout, PG wins.
+- **Inventory rebuild** (`inventory.Service.Rebuild`; admin endpoint `POST /admin/events/{id}/rebuild-cache`, plus automatically through `EnsureLoaded` whenever `meta.loaded` is missing: the worker checks every open event on each sweeper tick, and a hold script that answers NOT_LOADED triggers it in the API). Steps: reclaim expired holds in PG first (the sweeper's PG pass). Then, in one REPEATABLE READ read-only snapshot, read `seats`, the live holds and `max(holds.fence)`. avail = AVAILABLE seats plus HELD seats whose `held_until` has passed (a hold takes those over in PG). sold = SOLD. Recreate the hold hashes, the `holds` ZSET and `holding` from live, unexpired PG holds, then run `inventory_load.lua`. `EnsureLoaded` takes `rebuild_lock` (SET NX, 30 s) so one process rebuilds at a time; the others answer 503 with `Retry-After: 1`. Throughout, PG wins. Tested by `TestRebuildAfterFlushAll`: 300 holds, `FLUSHALL`, rebuild, then Redis matches PG seat by seat and hold by hold.
 - **Queue restore:** from `queue_snapshots`, restore presize, tail, cursor and soldout. Users carry signed queue tokens (ticket inside), so positions survive. Tickets in `(cursor − OFFER_CLAIM_TTL × admit_rate, cursor]` get fresh offers. Users whose dedupe key was lost may rejoin, and their old token stays valid.
 
 ## 7. Seed data (`sluice seed`, idempotent)

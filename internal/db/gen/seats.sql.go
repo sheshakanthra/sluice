@@ -12,6 +12,24 @@ import (
 	"github.com/google/uuid"
 )
 
+const countFreeSeats = `-- name: CountFreeSeats :one
+SELECT count(*)::int AS free FROM seats
+WHERE event_id = $1
+  AND (state = 'AVAILABLE' OR (state = 'HELD' AND held_until <= $2::timestamptz))
+`
+
+type CountFreeSeatsParams struct {
+	EventID uuid.UUID
+	Now     time.Time
+}
+
+func (q *Queries) CountFreeSeats(ctx context.Context, arg CountFreeSeatsParams) (int32, error) {
+	row := q.db.QueryRow(ctx, countFreeSeats, arg.EventID, arg.Now)
+	var free int32
+	err := row.Scan(&free)
+	return free, err
+}
+
 const extendSeatHold = `-- name: ExtendSeatHold :execrows
 UPDATE seats
 SET held_until = $1::timestamptz, version = version + 1
@@ -151,6 +169,48 @@ func (q *Queries) InsertSeats(ctx context.Context, arg InsertSeatsParams) (int64
 	return result.RowsAffected(), nil
 }
 
+const listSeatStates = `-- name: ListSeatStates :many
+SELECT seat_no, state, hold_id, held_until, (sum(version) OVER ())::bigint AS ver
+FROM seats WHERE event_id = $1 ORDER BY seat_no
+`
+
+type ListSeatStatesRow struct {
+	SeatNo    int32
+	State     SeatState
+	HoldID    *uuid.UUID
+	HeldUntil *time.Time
+	Ver       int64
+}
+
+// Seat map for rebuild, repair and the pg_only availability source. ver is
+// the sum of seat versions: every transition bumps one seat's version, so it
+// only grows.
+func (q *Queries) ListSeatStates(ctx context.Context, eventID uuid.UUID) ([]ListSeatStatesRow, error) {
+	rows, err := q.db.Query(ctx, listSeatStates, eventID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListSeatStatesRow{}
+	for rows.Next() {
+		var i ListSeatStatesRow
+		if err := rows.Scan(
+			&i.SeatNo,
+			&i.State,
+			&i.HoldID,
+			&i.HeldUntil,
+			&i.Ver,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listSeatsByEvent = `-- name: ListSeatsByEvent :many
 SELECT event_id, seat_no, label, section, row_no, col_no, state, hold_id, held_until, order_id, version FROM seats WHERE event_id = $1 ORDER BY seat_no
 `
@@ -180,6 +240,43 @@ func (q *Queries) ListSeatsByEvent(ctx context.Context, eventID uuid.UUID) ([]Se
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const pickFreeSeats = `-- name: PickFreeSeats :many
+SELECT seat_no FROM seats
+WHERE event_id = $1
+  AND (state = 'AVAILABLE' OR (state = 'HELD' AND held_until <= $2::timestamptz))
+ORDER BY seat_no
+LIMIT $3
+FOR UPDATE SKIP LOCKED
+`
+
+type PickFreeSeatsParams struct {
+	EventID uuid.UUID
+	Now     time.Time
+	Qty     int32
+}
+
+// HOLD_PATH=pg_only best-available: the lowest free seats, skipping rows
+// another transaction has locked so concurrent buyers do not queue.
+func (q *Queries) PickFreeSeats(ctx context.Context, arg PickFreeSeatsParams) ([]int32, error) {
+	rows, err := q.db.Query(ctx, pickFreeSeats, arg.EventID, arg.Now, arg.Qty)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []int32{}
+	for rows.Next() {
+		var seat_no int32
+		if err := rows.Scan(&seat_no); err != nil {
+			return nil, err
+		}
+		items = append(items, seat_no)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
@@ -234,4 +331,63 @@ func (q *Queries) SellSeats(ctx context.Context, arg SellSeatsParams) (int64, er
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const takeSeats = `-- name: TakeSeats :many
+WITH cur AS (
+  SELECT seat_no, hold_id AS prev_hold_id FROM seats
+  WHERE event_id = $3 AND seat_no = ANY($5::int[])
+  ORDER BY seat_no
+  FOR UPDATE
+)
+UPDATE seats s
+SET state = 'HELD', hold_id = $1::uuid, held_until = $2::timestamptz, version = s.version + 1
+FROM cur
+WHERE s.event_id = $3 AND s.seat_no = cur.seat_no
+  AND (s.state = 'AVAILABLE' OR (s.state = 'HELD' AND s.held_until <= $4::timestamptz))
+RETURNING s.seat_no, cur.prev_hold_id
+`
+
+type TakeSeatsParams struct {
+	HoldID    uuid.UUID
+	HeldUntil time.Time
+	EventID   uuid.UUID
+	Now       time.Time
+	SeatNos   []int32
+}
+
+type TakeSeatsRow struct {
+	SeatNo     int32
+	PrevHoldID *uuid.UUID
+}
+
+// The hold write (ARCHITECTURE §4.2): AVAILABLE seats, or HELD seats whose
+// held_until has passed (PG takeover), become HELD by @hold_id. The CTE locks
+// the rows in seat order first so overlapping multi-seat holds cannot
+// deadlock. Each row returns the hold it was taken from (NULL if it was
+// AVAILABLE). The caller rolls back unless len(result) == len(seat_nos).
+func (q *Queries) TakeSeats(ctx context.Context, arg TakeSeatsParams) ([]TakeSeatsRow, error) {
+	rows, err := q.db.Query(ctx, takeSeats,
+		arg.HoldID,
+		arg.HeldUntil,
+		arg.EventID,
+		arg.Now,
+		arg.SeatNos,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []TakeSeatsRow{}
+	for rows.Next() {
+		var i TakeSeatsRow
+		if err := rows.Scan(&i.SeatNo, &i.PrevHoldID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

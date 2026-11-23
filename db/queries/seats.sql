@@ -42,3 +42,44 @@ WHERE event_id = @event_id AND seat_no = ANY(@seat_nos::int[])
 UPDATE seats
 SET state = 'AVAILABLE', hold_id = NULL, held_until = NULL, version = version + 1
 WHERE event_id = @event_id AND hold_id = @hold_id::uuid AND state = 'HELD';
+
+-- name: TakeSeats :many
+-- The hold write (ARCHITECTURE §4.2): AVAILABLE seats, or HELD seats whose
+-- held_until has passed (PG takeover), become HELD by @hold_id. The CTE locks
+-- the rows in seat order first so overlapping multi-seat holds cannot
+-- deadlock. Each row returns the hold it was taken from (NULL if it was
+-- AVAILABLE). The caller rolls back unless len(result) == len(seat_nos).
+WITH cur AS (
+  SELECT seat_no, hold_id AS prev_hold_id FROM seats
+  WHERE event_id = @event_id AND seat_no = ANY(@seat_nos::int[])
+  ORDER BY seat_no
+  FOR UPDATE
+)
+UPDATE seats s
+SET state = 'HELD', hold_id = @hold_id::uuid, held_until = @held_until::timestamptz, version = s.version + 1
+FROM cur
+WHERE s.event_id = @event_id AND s.seat_no = cur.seat_no
+  AND (s.state = 'AVAILABLE' OR (s.state = 'HELD' AND s.held_until <= @now::timestamptz))
+RETURNING s.seat_no, cur.prev_hold_id;
+
+-- name: PickFreeSeats :many
+-- HOLD_PATH=pg_only best-available: the lowest free seats, skipping rows
+-- another transaction has locked so concurrent buyers do not queue.
+SELECT seat_no FROM seats
+WHERE event_id = @event_id
+  AND (state = 'AVAILABLE' OR (state = 'HELD' AND held_until <= @now::timestamptz))
+ORDER BY seat_no
+LIMIT @qty
+FOR UPDATE SKIP LOCKED;
+
+-- name: CountFreeSeats :one
+SELECT count(*)::int AS free FROM seats
+WHERE event_id = @event_id
+  AND (state = 'AVAILABLE' OR (state = 'HELD' AND held_until <= @now::timestamptz));
+
+-- name: ListSeatStates :many
+-- Seat map for rebuild, repair and the pg_only availability source. ver is
+-- the sum of seat versions: every transition bumps one seat's version, so it
+-- only grows.
+SELECT seat_no, state, hold_id, held_until, (sum(version) OVER ())::bigint AS ver
+FROM seats WHERE event_id = @event_id ORDER BY seat_no;

@@ -3,9 +3,11 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,10 +91,13 @@ func TestReadyzAgainstRealDependencies(t *testing.T) {
 	}
 	defer func() { _ = mig.Close() }()
 
-	h := APIHandler(Deps{
+	h, err := APIHandler(ctx, Deps{
 		Config: cfg, Log: slog.New(slog.DiscardHandler), Registry: obs.NewRegistry(), PG: pool, Redis: rdb,
 		Migrations: mig.Check,
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -152,8 +157,16 @@ func TestReadyzAgainstRealDependencies(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	metrics, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("/metrics = %d", resp.StatusCode)
+	}
+	// P2 inventory metrics are registered and pre-initialised.
+	for _, name := range []string{"holds_requests_total{result=\"ok\"}", "holds_expired_total", "holds_compensations_total",
+		"redis_script_duration_seconds_count{script=\"hold_seats\"}"} {
+		if !strings.Contains(string(metrics), name) {
+			t.Errorf("/metrics lacks %s", name)
+		}
 	}
 }

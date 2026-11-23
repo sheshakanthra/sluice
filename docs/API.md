@@ -16,7 +16,8 @@ Send it as `Authorization: Bearer <token>`. Every token has `iss=sluice`, `iat`,
 ### 1.2 Idempotency (Stripe-style) on every mutating endpoint marked **IK**
 - Header: `Idempotency-Key: <8–128 chars>`. The client generates it (UUID) once per user intent and reuses it on retries.
 - Scope is `(user_id, key)`. The stored request hash is `sha256(method | route | canonical JSON body)`.
-- Same key and same hash, already completed → **replay** the stored status and body, plus the header `Idempotent-Replayed: true`.
+- Same key and same hash, already completed → **replay** the stored status and body, plus the header `Idempotent-Replayed: true`. Responses with status < 500 are stored (business 4xx outcomes included). A 5xx deletes the key, so the retry runs again. The replayed body has the same JSON values, but key order and spacing follow Postgres `jsonb` (ADR 0006).
+- Canonical JSON means the body decoded and re-encoded with object keys sorted and numbers kept verbatim, so whitespace and key order don't change the hash. Bodies are capped at 64 KiB.
 - Same key and a **different** hash → `422 IDEMPOTENCY_KEY_REUSED`.
 - Same key while the first request is still in flight → `409 REQUEST_IN_PROGRESS` with `Retry-After: 1`.
 - A STARTED key past `locked_until` (a crash) becomes re-executable. Handlers must be safe to re-run, which is why hold IDs are deterministic and PSP keys are deterministic.
@@ -132,7 +133,7 @@ Response:
 { "hold_id": "5f0c...", "status": "ACTIVE", "seat_nos": [212, 213],
   "labels": ["C5-13", "C5-14"], "fence": 9182, "expires_at": "2026-11-22T04:35:12Z" }
 ```
-Errors: `SEATS_TAKEN{taken}`, `INSUFFICIENT_SEATS{available}`, `SOLD_OUT`, `HOLD_LIMIT`, `QUOTA_EXCEEDED` (pre-checked in PG, enforced at confirm), `NOT_ADMITTED`.
+Errors: `SEATS_TAKEN{taken}`, `INSUFFICIENT_SEATS{available}`, `SOLD_OUT`, `HOLD_LIMIT`, `QUOTA_EXCEEDED` (pre-checked in PG inside the hold transaction, enforced at confirm), `NOT_ADMITTED` (no token while `QUEUE_ENFORCED`), `TOKEN_INVALID` (an admission token for another event, or a session token while the queue is enforced), `VALIDATION` (both or neither of `seat_nos`/`quantity`, more than `MAX_SEATS_PER_ORDER`, an unknown or duplicate seat, unknown fields). With `QUEUE_ENFORCED=false` (rush/test only) a session token is accepted too. `hold_id` is `UUIDv5(NS_HOLD, user_id:Idempotency-Key)` (DATA-MODEL §5), and `expires_at` has millisecond precision.
 
 ### 3.5 `POST /orders` (IK) → 201
 ```json
@@ -167,7 +168,7 @@ Creating the order moves the hold to PAYMENT_PENDING with `PAYMENT_HOLD_TTL`. A 
 { "version": 18231, "counts": { "available": 120, "held": 310, "sold": 70, "capacity": 500 },
   "states": "<base64: 2 bits per seat_no, 00=available 01=held 10=sold>" }
 ```
-Each API replica serves this from an in-memory cache refreshed when `ver` changes.
+Each API replica serves this from an in-memory cache. It re-checks each event at most every 100 ms, first reading only `ver`, and rebuilds the bitmap only when `ver` changed (one `MULTI` read of `ver`, `avail` and `sold`). Packing: 2 bits per seat, MSB first, so seat *i* is in byte ⌊*i*/4⌋ at bit shift 6 − 2·(*i* mod 4); the last byte is zero-padded. Seats in neither `avail` nor `sold` are held. `ETag` is `"r<ver>"`. With `HOLD_PATH=pg_only`, or while Redis isn't loaded, the source is Postgres and the `ETag` is `"p<sum of seat versions>"` (ADR 0006). `If-None-Match` with the current `ETag` returns 304. `GET /events` and `GET /events/{id}` take their `counts` from the same cache, falling back to Postgres counts on error.
 
 ### 3.9 `GET /stats/{id}` → 200
 ```json
@@ -190,6 +191,12 @@ Ordered by `sale_opens_at`, then slug. In P1 the counts come from Postgres; P2 s
 
 ### 3.11 `GET /events/{eventId}` → 200 / 404
 The §3.10 object plus `"layout"` (the descriptor in DATA-MODEL §7). `{eventId}` is a UUID or a slug. An unknown or malformed id returns 404 `NOT_FOUND`. If Postgres is unreachable you get 503 `DEPENDENCY_UNAVAILABLE` with `Retry-After: 1`.
+
+### 3.12 Sessions, release, test admission, cache rebuild (P2)
+- `POST /sessions` → 201 (§3.1). The token is `aud=session` for 24 h; `sub` is a fresh UUIDv7. Tokens are HS256 via `golang-jwt/jwt/v5`; `exp` and `iat` get 5 s of clock-skew leeway.
+- `DELETE /holds/{holdId}` → 204. Releasing a hold that is already RELEASED or EXPIRED is a 204 no-op. Someone else's hold, or an unknown id, gives 404 `NOT_FOUND`. A hold with an order (PAYMENT_PENDING) or a sold one gives 409 `ORDER_STATE`.
+- `POST /test/admit` (mounted only when `TEST_ENDPOINTS_ENABLED=true`, which config allows only for `APP_ENV` rush/test): `{ "event_id": "<uuid or slug>", "user_id": "<uuid>" }` → 200 `{ "event_id", "user_id", "admission_token", "expires_at" }`, with an admission TTL of `ADMISSION_TTL`.
+- `POST /admin/events/{eventId}/rebuild-cache` with `Authorization: Bearer <ADMIN_TOKEN>` → 200 `{ "event_id", "available", "held", "sold", "holds", "reclaimed", "fence_floor" }`. A wrong or missing admin token gives 401 `TOKEN_INVALID`.
 
 ## 4. Webhooks (MockPay → SLUICE)
 `POST /api/v1/webhooks/mockpay` with headers:

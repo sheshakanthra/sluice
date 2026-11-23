@@ -20,7 +20,6 @@ func TestRun(t *testing.T) {
 		{"version", []string{"version"}, exitOK, "sluice ", ""},
 		{"help", []string{"help"}, exitOK, "usage: sluice", ""},
 		{"unknown", []string{"frobnicate"}, exitUsage, "", `unknown command "frobnicate"`},
-		{"worker", []string{"worker"}, exitUsage, "", "sluice worker: not implemented yet"},
 		{"mockpay", []string{"mockpay"}, exitUsage, "", "sluice mockpay: not implemented yet"},
 		{"rush", []string{"rush"}, exitUsage, "", "sluice rush: not implemented yet"},
 		{"audit", []string{"audit"}, exitUsage, "", "sluice audit: not implemented yet"},

@@ -1,6 +1,7 @@
-// Package inventory owns seats and holds. This file holds the pure seat and
-// hold state machines from docs/DATA-MODEL.md section 3; the Redis fast path
-// and the Postgres hold flow arrive in P2.
+// Package inventory owns seats and holds: the Redis fast path, the Postgres
+// hold transaction (hold.go), the sweeper, rebuild (R1) and the availability
+// cache. This file holds the pure seat and hold state machines from
+// docs/DATA-MODEL.md section 3.
 package inventory
 
 import "github.com/sheshakanthra/sluice/internal/fsm"

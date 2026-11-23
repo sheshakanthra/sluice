@@ -87,6 +87,37 @@ func (q *Queries) GetHoldForUpdate(ctx context.Context, id uuid.UUID) (Hold, err
 	return i, err
 }
 
+const getHoldsByIDs = `-- name: GetHoldsByIDs :many
+SELECT id, status, expires_at FROM holds WHERE id = ANY($1::uuid[])
+`
+
+type GetHoldsByIDsRow struct {
+	ID        uuid.UUID
+	Status    HoldStatus
+	ExpiresAt time.Time
+}
+
+// Sweeper: what PG says about holds found in the Redis expiry index.
+func (q *Queries) GetHoldsByIDs(ctx context.Context, ids []uuid.UUID) ([]GetHoldsByIDsRow, error) {
+	rows, err := q.db.Query(ctx, getHoldsByIDs, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []GetHoldsByIDsRow{}
+	for rows.Next() {
+		var i GetHoldsByIDsRow
+		if err := rows.Scan(&i.ID, &i.Status, &i.ExpiresAt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getLiveHoldForUser = `-- name: GetLiveHoldForUser :one
 SELECT id, event_id, user_id, seat_nos, status, fence, expires_at, created_at, updated_at FROM holds
 WHERE event_id = $1 AND user_id = $2 AND status IN ('ACTIVE', 'PAYMENT_PENDING')
@@ -201,6 +232,48 @@ func (q *Queries) ListExpiredHolds(ctx context.Context, arg ListExpiredHoldsPara
 	return items, nil
 }
 
+const listLiveHoldsByEvent = `-- name: ListLiveHoldsByEvent :many
+SELECT id, user_id, seat_nos, status, fence, expires_at FROM holds
+WHERE event_id = $1 AND status IN ('ACTIVE', 'PAYMENT_PENDING')
+ORDER BY id
+`
+
+type ListLiveHoldsByEventRow struct {
+	ID        uuid.UUID
+	UserID    uuid.UUID
+	SeatNos   []int32
+	Status    HoldStatus
+	Fence     int64
+	ExpiresAt time.Time
+}
+
+func (q *Queries) ListLiveHoldsByEvent(ctx context.Context, eventID uuid.UUID) ([]ListLiveHoldsByEventRow, error) {
+	rows, err := q.db.Query(ctx, listLiveHoldsByEvent, eventID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListLiveHoldsByEventRow{}
+	for rows.Next() {
+		var i ListLiveHoldsByEventRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.SeatNos,
+			&i.Status,
+			&i.Fence,
+			&i.ExpiresAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const markHoldPaymentPending = `-- name: MarkHoldPaymentPending :execrows
 UPDATE holds
 SET status = 'PAYMENT_PENDING', expires_at = $1, updated_at = now()
@@ -220,6 +293,18 @@ func (q *Queries) MarkHoldPaymentPending(ctx context.Context, arg MarkHoldPaymen
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const maxHoldFence = `-- name: MaxHoldFence :one
+SELECT coalesce(max(fence), 0)::bigint AS fence FROM holds WHERE event_id = $1
+`
+
+// Floor for the Redis fence counter after a rebuild (fences never go back).
+func (q *Queries) MaxHoldFence(ctx context.Context, eventID uuid.UUID) (int64, error) {
+	row := q.db.QueryRow(ctx, maxHoldFence, eventID)
+	var fence int64
+	err := row.Scan(&fence)
+	return fence, err
 }
 
 const nextHoldFence = `-- name: NextHoldFence :one

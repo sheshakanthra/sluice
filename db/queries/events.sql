@@ -41,3 +41,8 @@ WHERE id = @id;
 
 -- name: SetEventStatus :execrows
 UPDATE events SET status = @status WHERE id = @id;
+
+-- name: ListOpenEvents :many
+-- Events whose inventory the worker keeps loaded and swept.
+SELECT id, capacity, max_per_user, price_paise, sale_opens_at, status FROM events
+WHERE status <> 'CLOSED' ORDER BY id;

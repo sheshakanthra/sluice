@@ -201,6 +201,48 @@ func (q *Queries) ListEventsWithCounts(ctx context.Context) ([]ListEventsWithCou
 	return items, nil
 }
 
+const listOpenEvents = `-- name: ListOpenEvents :many
+SELECT id, capacity, max_per_user, price_paise, sale_opens_at, status FROM events
+WHERE status <> 'CLOSED' ORDER BY id
+`
+
+type ListOpenEventsRow struct {
+	ID          uuid.UUID
+	Capacity    int32
+	MaxPerUser  int32
+	PricePaise  int64
+	SaleOpensAt time.Time
+	Status      EventStatus
+}
+
+// Events whose inventory the worker keeps loaded and swept.
+func (q *Queries) ListOpenEvents(ctx context.Context) ([]ListOpenEventsRow, error) {
+	rows, err := q.db.Query(ctx, listOpenEvents)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListOpenEventsRow{}
+	for rows.Next() {
+		var i ListOpenEventsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Capacity,
+			&i.MaxPerUser,
+			&i.PricePaise,
+			&i.SaleOpensAt,
+			&i.Status,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const setEventSchedule = `-- name: SetEventSchedule :execrows
 UPDATE events
 SET prequeue_opens_at = $1, sale_opens_at = $2,

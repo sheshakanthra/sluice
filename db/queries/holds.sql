@@ -47,3 +47,16 @@ WHERE status IN ('ACTIVE', 'PAYMENT_PENDING') AND expires_at <= @now
 ORDER BY expires_at
 LIMIT @batch_size
 FOR UPDATE SKIP LOCKED;
+
+-- name: MaxHoldFence :one
+-- Floor for the Redis fence counter after a rebuild (fences never go back).
+SELECT coalesce(max(fence), 0)::bigint AS fence FROM holds WHERE event_id = $1;
+
+-- name: ListLiveHoldsByEvent :many
+SELECT id, user_id, seat_nos, status, fence, expires_at FROM holds
+WHERE event_id = $1 AND status IN ('ACTIVE', 'PAYMENT_PENDING')
+ORDER BY id;
+
+-- name: GetHoldsByIDs :many
+-- Sweeper: what PG says about holds found in the Redis expiry index.
+SELECT id, status, expires_at FROM holds WHERE id = ANY(@ids::uuid[]);

@@ -11,21 +11,28 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/errgroup"
 
+	"github.com/sheshakanthra/sluice/internal/auth"
 	"github.com/sheshakanthra/sluice/internal/config"
 	"github.com/sheshakanthra/sluice/internal/db"
 	"github.com/sheshakanthra/sluice/internal/db/gen"
 	"github.com/sheshakanthra/sluice/internal/events"
 	"github.com/sheshakanthra/sluice/internal/httpx"
+	"github.com/sheshakanthra/sluice/internal/inventory"
 	"github.com/sheshakanthra/sluice/internal/obs"
+	"github.com/sheshakanthra/sluice/internal/redisx"
 )
 
 // requestTimeout bounds every API request context.
 const requestTimeout = 10 * time.Second
+
+// availabilityMinAge is how often each replica re-checks an event's seat map.
+const availabilityMinAge = 100 * time.Millisecond
 
 // Deps are the long-lived dependencies of the API process.
 type Deps struct {
@@ -40,21 +47,12 @@ type Deps struct {
 }
 
 // NewRedis builds a go-redis client with bounded timeouts.
-func NewRedis(url string) (*redis.Client, error) {
-	opt, err := redis.ParseURL(url)
-	if err != nil {
-		return nil, errors.New("parse REDIS_URL: invalid URL")
-	}
-	opt.DialTimeout = 2 * time.Second
-	opt.ReadTimeout = 2 * time.Second
-	opt.WriteTimeout = 2 * time.Second
-	return redis.NewClient(opt), nil
-}
+func NewRedis(url string) (*redis.Client, error) { return redisx.NewClient(url) }
 
 // APIHandler builds the full API handler: routes plus the middleware stack.
 // Order (outermost first): request id → observe (metrics + access log) →
 // recover → CORS → timeout → router.
-func APIHandler(d Deps) http.Handler {
+func APIHandler(ctx context.Context, d Deps) (http.Handler, error) {
 	rt := httpx.NewRouter()
 	checks := []httpx.Check{
 		{Name: "postgres", Ping: d.PG.Ping},
@@ -65,7 +63,44 @@ func APIHandler(d Deps) http.Handler {
 	}
 	httpx.RegisterHealth(rt, d.Log, checks...)
 	rt.Handle("GET /metrics", obs.MetricsHandler(d.Registry))
-	events.RegisterRoutes(rt, events.NewStore(gen.New(d.PG)), d.Log)
+
+	keyring, err := auth.NewKeyring(d.Config.TokenKeys, nil)
+	if err != nil {
+		return nil, err
+	}
+	inv, err := newInventory(ctx, d.Config, d.Log, d.Registry, d.PG, d.Redis)
+	if err != nil {
+		return nil, err
+	}
+	avail := inv.NewAvailabilityCache(availabilityMinAge)
+	q := gen.New(d.PG)
+
+	store := events.NewStore(q).WithLiveCounts(func(ctx context.Context, id uuid.UUID) (events.Counts, error) {
+		c, err := avail.LiveCounts(ctx, id)
+		//nolint:gosec // G115: seat counts are bounded by events.capacity (int32)
+		return events.Counts{Available: int32(c.Available), Held: int32(c.Held), Sold: int32(c.Sold), Capacity: int32(c.Capacity)}, err
+	})
+	events.RegisterRoutes(rt, store, d.Log)
+
+	rt.HandleFunc("POST /api/v1/sessions", keyring.SessionsHandler(d.Log))
+	if d.Config.TestEndpointsEnabled && d.Config.AppEnv.AllowsUnsafeModes() {
+		resolve := func(ctx context.Context, idOrSlug string) (uuid.UUID, bool, error) {
+			ev, err := inv.Event(ctx, idOrSlug)
+			if err != nil {
+				if errors.Is(err, inventory.ErrEventNotFound) {
+					return uuid.Nil, false, nil
+				}
+				return uuid.Nil, false, err
+			}
+			return ev.ID, true, nil
+		}
+		rt.HandleFunc("POST /api/v1/test/admit", keyring.TestAdmitHandler(resolve, d.Config.AdmissionTTL, d.Log))
+	}
+	inventory.RegisterRoutes(rt, inventory.HandlerDeps{
+		Svc: inv, Avail: avail, Keys: keyring,
+		Idem:          httpx.NewIdempotency(q, auth.UserID, d.Log, nil),
+		QueueEnforced: d.Config.QueueEnforced, AdminToken: d.Config.AdminToken, Log: d.Log,
+	})
 
 	m := httpx.NewHTTPMetrics(d.Registry, "api")
 	return httpx.Chain(rt,
@@ -74,7 +109,7 @@ func APIHandler(d Deps) http.Handler {
 		httpx.Recover(d.Log),
 		httpx.CORS(d.Config.CORSOrigins),
 		httpx.Timeout(requestTimeout),
-	)
+	), nil
 }
 
 // RunAPI runs `sluice api` until ctx is cancelled (SIGINT/SIGTERM).
@@ -100,7 +135,11 @@ func RunAPI(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	defer func() { _ = rdb.Close() }()
 
 	d := Deps{Config: cfg, Log: log, Registry: obs.NewRegistry(), PG: pg, Redis: rdb, Migrations: mig.Check}
-	srv := httpx.NewServer(cfg.HTTPAddr, APIHandler(d), log)
+	h, err := APIHandler(ctx, d)
+	if err != nil {
+		return fmt.Errorf("api: %w", err)
+	}
+	srv := httpx.NewServer(cfg.HTTPAddr, h, log)
 
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error { return httpx.Serve(gctx, srv, log, nil) })

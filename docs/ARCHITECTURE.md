@@ -87,10 +87,10 @@ sequenceDiagram
     API-->>U: 409 SEATS_TAKEN / INSUFFICIENT_SEATS
   else granted
     R-->>API: OK (fence, expires_at)
-    API->>PG: tx: insert hold, UPDATE seats ... WHERE AVAILABLE or expired HELD, store 201
+    API->>PG: tx: quota pre-check, insert hold, UPDATE seats ... WHERE AVAILABLE or expired HELD (expire the old hold in the same tx)
     alt rows updated != n (Redis was wrong)
-      API->>R: hold_release.lua (compensate) + mark seats for repair
-      API-->>U: 409 SEATS_TAKEN
+      API->>R: hold_release.lua (compensate) + inventory_repair.lua (seats PG says are taken)
+      API-->>U: 409 SEATS_TAKEN (or HOLD_LIMIT / QUOTA_EXCEEDED)
     else ok
       API-->>U: 201 hold
     end
