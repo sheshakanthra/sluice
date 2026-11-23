@@ -5,6 +5,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestRun(t *testing.T) {
@@ -19,12 +20,13 @@ func TestRun(t *testing.T) {
 		{"version", []string{"version"}, exitOK, "sluice ", ""},
 		{"help", []string{"help"}, exitOK, "usage: sluice", ""},
 		{"unknown", []string{"frobnicate"}, exitUsage, "", `unknown command "frobnicate"`},
-		{"worker", []string{"worker"}, exitUsage, "", "sluice worker: not implemented in P0"},
-		{"mockpay", []string{"mockpay"}, exitUsage, "", "sluice mockpay: not implemented in P0"},
-		{"migrate", []string{"migrate"}, exitUsage, "", "sluice migrate: not implemented in P0"},
-		{"seed", []string{"seed"}, exitUsage, "", "sluice seed: not implemented in P0"},
-		{"rush", []string{"rush"}, exitUsage, "", "sluice rush: not implemented in P0"},
-		{"audit", []string{"audit"}, exitUsage, "", "sluice audit: not implemented in P0"},
+		{"worker", []string{"worker"}, exitUsage, "", "sluice worker: not implemented yet"},
+		{"mockpay", []string{"mockpay"}, exitUsage, "", "sluice mockpay: not implemented yet"},
+		{"rush", []string{"rush"}, exitUsage, "", "sluice rush: not implemented yet"},
+		{"audit", []string{"audit"}, exitUsage, "", "sluice audit: not implemented yet"},
+		{"seed bad flag", []string{"seed", "--nope"}, exitUsage, "", "flag provided but not defined"},
+		{"seed bad duration", []string{"seed", "--opens-in", "soon"}, exitUsage, "", "invalid value"},
+		{"seed stray arg", []string{"seed", "extra"}, exitUsage, "", "unexpected arguments"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -52,5 +54,31 @@ func TestRunAPIFailsFastOnBadConfig(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "BASELINE") {
 		t.Fatalf("stderr should explain the refusal: %q", errOut.String())
+	}
+}
+
+func TestParseSeedFlags(t *testing.T) {
+	var errOut bytes.Buffer
+	opts, err := parseSeedFlags([]string{"--event", "loadtest-big", "--capacity", "50000", "--opens-in", "30s"}, &errOut)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Event != "loadtest-big" || opts.Capacity != 50000 || opts.OpensIn == nil || *opts.OpensIn != 30*time.Second {
+		t.Fatalf("opts = %+v", opts)
+	}
+	opts, err = parseSeedFlags(nil, &errOut)
+	if err != nil || opts.OpensIn != nil || opts.Event != "" || opts.Capacity != 0 {
+		t.Fatalf("defaults: %+v %v", opts, err)
+	}
+}
+
+// --capacity is refused outside rush/test before any database work.
+func TestSeedCapacityRefusedInDev(t *testing.T) {
+	t.Setenv("APP_ENV", "dev")
+	t.Setenv("DATABASE_URL", "postgres://nobody@127.0.0.1:1/none")
+	var out, errOut bytes.Buffer
+	code := run(context.Background(), []string{"seed", "--event", "big", "--capacity", "100"}, &out, &errOut)
+	if code != exitFailure || !strings.Contains(out.String()+errOut.String(), "only allowed when APP_ENV is rush or test") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", code, out.String(), errOut.String())
 	}
 }

@@ -51,7 +51,7 @@ Source commands: `go version`, `node -v`, `pnpm -v`, `task --version`, `golangci
 | Caddy / Toxiproxy / k6 | not added yet (Caddy P5, k6 P5, Toxiproxy P7); latest Caddy tag seen in P0: `caddy:2.11.9` | compose files (later phases) |
 | pgx / go-redis / client_golang / uuid | pgx v5.13.0 / go-redis v9.23.0 / client_golang v1.25.0 / uuid v1.6.0 | `go.mod` |
 | testcontainers-go | v0.45.0 (+ modules/postgres, modules/redis v0.45.0) | `go.mod` |
-| River / goose / sqlc | not added yet (P1/P3) | `go.mod`, Taskfile |
+| River / goose / sqlc / rapid | River v0.51.2 (`river`, `riverdriver/riverpgxv5`; migrator only until P3) / goose v3.30.1 / sqlc 1.31.1 via the `sqlc/sqlc:1.31.1` Docker image (ADR 0005) / rapid v1.3.0 | `go.mod`, Taskfile (`SQLC_IMAGE`) |
 | golangci-lint / govulncheck / Task | golangci-lint v2.15.0 / govulncheck v1.10.0 / Task 3.54.0 | `.github/workflows/ci.yml` (`env`) |
 | Docker (local) | Docker Desktop, engine 28.3.3 | (local only) |
 
@@ -72,7 +72,9 @@ sluice/
 │   ├── httpx/                 # router, middleware (request id, recover, timeout, logging,
 │   │                          #   metrics, CORS, rate limit, idempotency), problem+json
 │   ├── auth/                  # JWT issue/verify (session|queue|admission), key ring
-│   ├── db/                    # pgxpool, tx helpers; gen/ = sqlc output
+│   ├── db/                    # pgxpool, tx helpers (WithTx retry), migrator; gen/ = sqlc output
+│   ├── events/                # event catalogue: layout model, seed, GET /events[/{id}] (ADR 0005)
+│   ├── fsm/                   # generic transition table (+ fsmtest) for the domain state machines
 │   ├── redisx/                # client, script loader; scripts/*.lua (embedded)
 │   ├── inventory/             # holds: Redis fast path + PG authority; naive/ (baseline only)
 │   ├── queue/                 # waiting room: join/status/claim, snapshot cache, controller
@@ -84,7 +86,8 @@ sluice/
 │   ├── demo/                  # demo rush (bots) for live mode
 │   ├── rush/                  # swarm load generator + reporter
 │   ├── audit/                 # invariant auditor
-│   └── obs/                   # slog, metrics registry, pprof
+│   ├── obs/                   # slog, metrics registry, pprof
+│   └── testutil/pgtest/       # testcontainers Postgres per test package, one database per test
 ├── db/
 │   ├── embed.go               # package dbfs: //go:embed migrations/*.sql
 │   ├── migrations/            # goose: 0001_init.sql, 0002_naive_baseline.sql, ...

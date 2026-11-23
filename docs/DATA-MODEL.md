@@ -304,4 +304,13 @@ Every script is atomic and idempotent where noted, and returns a status string f
 
 Labels are `C<coach>-<1..50>`. `seat_no = (coach−1)×50 + (row−1)×5 + (col−1)`. The layout JSON carries coach, row and col so the UI can draw it.
 
+**Layout JSON** (`events.layout`, ADR 0005). It's a compact descriptor; the per-seat truth stays in `seats`:
+```json
+{ "version": 1, "kind": "train", "cols": 5, "aisle_after_col": 3, "seats_per_coach": 50,
+  "coaches": [ { "coach": 1, "label": "C1", "first_seat_no": 0, "rows": 10, "seats": 50 }, ... ] }
+```
+Within a coach, `seat_no = first_seat_no + (row−1)×cols + (col−1)` and `label = <label>-<seat_no − first_seat_no + 1>`. Only the last coach can be partial (capacity not a multiple of 50).
+
+**Seed rules:** the rush event's `sale_opens_at = now + 10 min` (or `--opens-in`). quiet-tuesday goes on sale at seed time (`ON_SALE`). `prequeue_opens_at` = seed time, `starts_at = sale_opens_at + 24 h`. Re-running seed never modifies an existing event: it fills in missing seats and refuses a capacity mismatch. Re-time with the admin open-sale endpoint.
+
 `sluice seed --event loadtest-big --capacity 50000` (rush/test only) creates a large event for the k6 checkout-capacity test.

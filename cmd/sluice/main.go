@@ -5,16 +5,20 @@ package main
 
 import (
 	"context"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/sheshakanthra/sluice/internal/app"
 	"github.com/sheshakanthra/sluice/internal/buildinfo"
 	"github.com/sheshakanthra/sluice/internal/config"
+	"github.com/sheshakanthra/sluice/internal/events"
 	"github.com/sheshakanthra/sluice/internal/obs"
 )
 
@@ -23,7 +27,7 @@ const (
 	exitOK       = 0
 	exitFailure  = 1
 	exitUsage    = 2 // also "not implemented yet"
-	notImplPhase = "not implemented in P0"
+	notImplPhase = "not implemented yet"
 )
 
 const usage = `usage: sluice <command>
@@ -33,7 +37,10 @@ commands:
   worker    run admission ticks, sweeper, jobs and reconciler
   mockpay   run the PSP simulator
   migrate   apply database migrations
-  seed      seed demo events
+  seed      seed demo events (idempotent)
+            --event <slug>      only this event (a new slug creates a custom event)
+            --capacity <n>      seats for --event (APP_ENV=rush or test only)
+            --opens-in <dur>    sale opens after this duration (e.g. 10m, 30s)
   rush      run the load-test swarm
   audit     check invariants against a running stack
   version   print version and commit
@@ -59,8 +66,16 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprint(stdout, usage)
 		return exitOK
 	case "api":
-		return runService(ctx, stderr, app.RunAPI)
-	case "worker", "mockpay", "migrate", "seed", "rush", "audit":
+		return runService(ctx, stdout, stderr, app.RunAPI)
+	case "migrate":
+		return runService(ctx, stdout, stderr, app.RunMigrate)
+	case "seed":
+		opts, err := parseSeedFlags(args[1:], stderr)
+		if err != nil {
+			return exitUsage
+		}
+		return runService(ctx, stdout, stderr, app.SeedFunc(opts))
+	case "worker", "mockpay", "rush", "audit":
 		_, _ = fmt.Fprintf(stderr, "sluice %s: %s\n", cmd, notImplPhase)
 		return exitUsage
 	default:
@@ -72,13 +87,13 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 type serviceFunc func(ctx context.Context, cfg *config.Config, log *slog.Logger) error
 
 // runService loads config fail-fast, builds the logger and runs svc.
-func runService(ctx context.Context, stderr io.Writer, svc serviceFunc) int {
+func runService(ctx context.Context, stdout, stderr io.Writer, svc serviceFunc) int {
 	cfg, err := config.FromEnv()
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "sluice: %v\n", err)
 		return exitFailure
 	}
-	log := obs.NewLogger(os.Stdout, cfg.LogLevel)
+	log := obs.NewLogger(stdout, cfg.LogLevel)
 	bi := buildinfo.Get()
 	log.InfoContext(ctx, "starting",
 		"version", bi.Version, "commit", bi.Commit, "go", bi.GoVersion, "app_env", string(cfg.AppEnv))
@@ -87,4 +102,30 @@ func runService(ctx context.Context, stderr io.Writer, svc serviceFunc) int {
 		return exitFailure
 	}
 	return exitOK
+}
+
+// parseSeedFlags parses `sluice seed` flags. Errors are already printed.
+func parseSeedFlags(args []string, stderr io.Writer) (events.SeedOptions, error) {
+	fs := flag.NewFlagSet("sluice seed", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	var (
+		opts    events.SeedOptions
+		opensIn time.Duration
+	)
+	fs.StringVar(&opts.Event, "event", "", "seed only this event slug (a new slug creates a custom event)")
+	fs.IntVar(&opts.Capacity, "capacity", 0, "seat count for --event (APP_ENV=rush or test only)")
+	fs.DurationVar(&opensIn, "opens-in", 0, "sale opens this long after seeding (default: 10m for the rush event, 0 for quiet-tuesday)")
+	if err := fs.Parse(args); err != nil {
+		return opts, err
+	}
+	if fs.NArg() > 0 {
+		_, _ = fmt.Fprintf(stderr, "sluice seed: unexpected arguments %v\n", fs.Args())
+		return opts, errors.New("unexpected arguments")
+	}
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "opens-in" {
+			opts.OpensIn = &opensIn
+		}
+	})
+	return opts, nil
 }

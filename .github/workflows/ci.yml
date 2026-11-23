@@ -44,6 +44,10 @@ jobs:
       - name: Lint
         run: task lint
 
+      # sqlc diff (pinned Docker image): generated code must match the queries.
+      - name: sqlc up to date
+        run: task gen:check
+
       # Includes testcontainers integration tests (Docker is available on ubuntu-latest).
       - name: Test (race)
         run: task test:race

@@ -178,6 +178,19 @@ Each API replica serves this from an in-memory cache refreshed when `ver` change
   "demo_rush": { "running": false } }
 ```
 
+### 3.10 `GET /events` → 200
+```json
+{ "events": [ { "id": "0193...", "slug": "tatkal-chn-sbc", "name": "Demo Express, Chennai → Bengaluru (Tatkal drop)",
+    "venue": "Chennai → Bengaluru", "status": "SCHEDULED",
+    "starts_at": "...", "prequeue_opens_at": "...", "sale_opens_at": "...",
+    "capacity": 500, "price_paise": 125000, "currency": "INR", "max_per_user": 4,
+    "counts": { "available": 500, "held": 0, "sold": 0, "capacity": 500 } } ] }
+```
+Ordered by `sale_opens_at`, then slug. In P1 the counts come from Postgres; P2 switches them to live counts. `Cache-Control: no-cache`.
+
+### 3.11 `GET /events/{eventId}` → 200 / 404
+The §3.10 object plus `"layout"` (the descriptor in DATA-MODEL §7). `{eventId}` is a UUID or a slug. An unknown or malformed id returns 404 `NOT_FOUND`. If Postgres is unreachable you get 503 `DEPENDENCY_UNAVAILABLE` with `Retry-After: 1`.
+
 ## 4. Webhooks (MockPay → SLUICE)
 `POST /api/v1/webhooks/mockpay` with headers:
 - `MockPay-Signature: t=<unix>,v1=<hex(hmac_sha256(MOCKPAY_WEBHOOK_SECRET, t + "." + raw_body))>`

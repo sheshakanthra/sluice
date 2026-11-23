@@ -14,6 +14,7 @@ import (
 	tcredis "github.com/testcontainers/testcontainers-go/modules/redis"
 
 	"github.com/sheshakanthra/sluice/internal/config"
+	"github.com/sheshakanthra/sluice/internal/db"
 	"github.com/sheshakanthra/sluice/internal/obs"
 )
 
@@ -24,8 +25,8 @@ const (
 )
 
 // TestReadyzAgainstRealDependencies runs the real API handler against real
-// Postgres 18 and Redis 8 containers: /readyz is 200 while both are up and
-// 503 once Redis is stopped.
+// Postgres 18 and Redis 8 containers: /readyz is 503 until migrations are
+// applied, 200 once they are, and 503 again once Redis is stopped.
 func TestReadyzAgainstRealDependencies(t *testing.T) {
 	if testing.Short() {
 		t.Skip("integration test (testcontainers); skipped with -short")
@@ -71,7 +72,7 @@ func TestReadyzAgainstRealDependencies(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pool, err := NewPGPool(ctx, cfg.DatabaseURL, 4)
+	pool, err := db.NewPool(ctx, cfg.DatabaseURL, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,8 +83,15 @@ func TestReadyzAgainstRealDependencies(t *testing.T) {
 	}
 	defer func() { _ = rdb.Close() }()
 
+	mig, err := db.NewMigrator(pool, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = mig.Close() }()
+
 	h := APIHandler(Deps{
 		Config: cfg, Log: slog.New(slog.DiscardHandler), Registry: obs.NewRegistry(), PG: pool, Redis: rdb,
+		Migrations: mig.Check,
 	})
 	srv := httptest.NewServer(h)
 	defer srv.Close()
@@ -100,23 +108,47 @@ func TestReadyzAgainstRealDependencies(t *testing.T) {
 		return resp.StatusCode, body
 	}
 
+	// Not migrated yet: reachable but not ready.
+	code, body := readyz()
+	checks, _ := body["checks"].(map[string]any)
+	if code != http.StatusServiceUnavailable || checks["migrations"] != "unavailable" || checks["postgres"] != "ok" || checks["redis"] != "ok" {
+		t.Fatalf("before migrate: /readyz = %d %v", code, body)
+	}
+	if _, err := mig.Up(ctx); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
 	if code, body := readyz(); code != http.StatusOK {
-		t.Fatalf("both deps up: /readyz = %d %v", code, body)
+		t.Fatalf("migrated, both deps up: /readyz = %d %v", code, body)
+	}
+
+	// The events catalogue is mounted on the same handler.
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/api/v1/events", http.NoBody)
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var list struct {
+		Events []any `json:"events"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&list)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || list.Events == nil || len(list.Events) != 0 {
+		t.Fatalf("/api/v1/events on an empty catalogue = %d %+v", resp.StatusCode, list)
 	}
 
 	stopTimeout := 10 * time.Second
 	if err := redisC.Stop(ctx, &stopTimeout); err != nil {
 		t.Fatalf("stop redis: %v", err)
 	}
-	code, body := readyz()
-	checks, _ := body["checks"].(map[string]any)
+	code, body = readyz()
+	checks, _ = body["checks"].(map[string]any)
 	if code != http.StatusServiceUnavailable || checks["redis"] != "unavailable" || checks["postgres"] != "ok" {
 		t.Fatalf("redis down: /readyz = %d %v", code, body)
 	}
 
 	// /metrics is served from the same handler.
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/metrics", http.NoBody)
-	resp, err := srv.Client().Do(req)
+	req, _ = http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+"/metrics", http.NoBody)
+	resp, err = srv.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}

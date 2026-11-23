@@ -17,6 +17,9 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/sheshakanthra/sluice/internal/config"
+	"github.com/sheshakanthra/sluice/internal/db"
+	"github.com/sheshakanthra/sluice/internal/db/gen"
+	"github.com/sheshakanthra/sluice/internal/events"
 	"github.com/sheshakanthra/sluice/internal/httpx"
 	"github.com/sheshakanthra/sluice/internal/obs"
 )
@@ -31,22 +34,9 @@ type Deps struct {
 	Registry *prometheus.Registry
 	PG       *pgxpool.Pool
 	Redis    *redis.Client
-}
-
-// NewPGPool builds a pgx pool. Connections are opened lazily, so the process
-// starts (and /readyz reports 503) even while Postgres is down.
-func NewPGPool(ctx context.Context, url string, maxConns int32) (*pgxpool.Pool, error) {
-	pc, err := pgxpool.ParseConfig(url)
-	if err != nil {
-		return nil, errors.New("parse DATABASE_URL: invalid connection string") // never echo the URL (password)
-	}
-	pc.MaxConns = maxConns
-	pc.ConnConfig.ConnectTimeout = 3 * time.Second
-	pool, err := pgxpool.NewWithConfig(ctx, pc)
-	if err != nil {
-		return nil, fmt.Errorf("create pg pool: %w", err)
-	}
-	return pool, nil
+	// Migrations reports whether goose and River migrations are applied
+	// (nil error) for /readyz. Usually (*db.Migrator).Check.
+	Migrations func(ctx context.Context) error
 }
 
 // NewRedis builds a go-redis client with bounded timeouts.
@@ -66,11 +56,16 @@ func NewRedis(url string) (*redis.Client, error) {
 // recover → CORS → timeout → router.
 func APIHandler(d Deps) http.Handler {
 	rt := httpx.NewRouter()
-	httpx.RegisterHealth(rt, d.Log,
-		httpx.Check{Name: "postgres", Ping: d.PG.Ping},
-		httpx.Check{Name: "redis", Ping: func(ctx context.Context) error { return d.Redis.Ping(ctx).Err() }},
-	)
+	checks := []httpx.Check{
+		{Name: "postgres", Ping: d.PG.Ping},
+		{Name: "redis", Ping: func(ctx context.Context) error { return d.Redis.Ping(ctx).Err() }},
+	}
+	if d.Migrations != nil {
+		checks = append(checks, httpx.Check{Name: "migrations", Ping: d.Migrations})
+	}
+	httpx.RegisterHealth(rt, d.Log, checks...)
 	rt.Handle("GET /metrics", obs.MetricsHandler(d.Registry))
+	events.RegisterRoutes(rt, events.NewStore(gen.New(d.PG)), d.Log)
 
 	m := httpx.NewHTTPMetrics(d.Registry, "api")
 	return httpx.Chain(rt,
@@ -86,11 +81,17 @@ func APIHandler(d Deps) http.Handler {
 func RunAPI(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	log = log.With(slog.String("svc", "api"))
 
-	pg, err := NewPGPool(ctx, cfg.DatabaseURL, cfg.DBMaxConns)
+	pg, err := db.NewPool(ctx, cfg.DatabaseURL, cfg.DBMaxConns)
 	if err != nil {
 		return err
 	}
 	defer pg.Close()
+
+	mig, err := db.NewMigrator(pg, log)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = mig.Close() }()
 
 	rdb, err := NewRedis(cfg.RedisURL)
 	if err != nil {
@@ -98,7 +99,7 @@ func RunAPI(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	}
 	defer func() { _ = rdb.Close() }()
 
-	d := Deps{Config: cfg, Log: log, Registry: obs.NewRegistry(), PG: pg, Redis: rdb}
+	d := Deps{Config: cfg, Log: log, Registry: obs.NewRegistry(), PG: pg, Redis: rdb, Migrations: mig.Check}
 	srv := httpx.NewServer(cfg.HTTPAddr, APIHandler(d), log)
 
 	g, gctx := errgroup.WithContext(ctx)

@@ -13,6 +13,9 @@ vars:
     sh: echo "${SLUICE_VERSION:-dev}"
   COMMIT:
     sh: git rev-parse --short HEAD 2>/dev/null || echo unknown
+  # sqlc runs from its pinned image so nobody needs a local (cgo) install.
+  SQLC_IMAGE: sqlc/sqlc:1.31.1
+  SQLC: docker run --rm -v "{{.ROOT_DIR}}:/src" -w /src/db {{.SQLC_IMAGE}}
   LDFLAGS: -s -w -X {{.MODULE}}/internal/buildinfo.Version={{.VERSION}} -X {{.MODULE}}/internal/buildinfo.Commit={{.COMMIT}}
 
 tasks:
@@ -55,9 +58,31 @@ tasks:
       - go run -ldflags "{{.LDFLAGS}}" ./cmd/sluice api
 
   gen:
-    desc: Code generation (sqlc arrives in P1)
+    desc: "sqlc generate: db/queries + db/migrations -> internal/db/gen (Docker)"
     cmds:
-      - echo "TODO(P1) - sqlc generate; nothing to generate in P0"
+      - "{{.SQLC}} generate"
+
+  gen:check:
+    desc: Fail if internal/db/gen is out of date with the queries/migrations (sqlc diff)
+    cmds:
+      - "{{.SQLC}} diff"
+
+  # ---------- database ----------
+  migrate:
+    desc: Apply goose migrations, then River's (idempotent)
+    cmds:
+      - go run ./cmd/sluice migrate
+
+  seed:
+    desc: "Seed demo events (idempotent). Flags after --, e.g. task seed -- --event loadtest-big --capacity 50000"
+    cmds:
+      - go run ./cmd/sluice seed {{.CLI_ARGS}}
+
+  db:psql:
+    desc: Open psql in the Postgres container
+    interactive: true
+    cmds:
+      - "{{.COMPOSE}} exec postgres psql -U sluice -d sluice"
 
   lint:
     desc: golangci-lint v2 (linters + gofmt/goimports)
@@ -110,12 +135,6 @@ tasks:
       - pnpm --dir web typecheck
 
   # ---------- later phases (stubs) ----------
-  migrate:
-    desc: "TODO(P1) apply migrations"
-    cmds: ["echo 'TODO(P1) - sluice migrate is not implemented yet' && exit 1"]
-  seed:
-    desc: "TODO(P1) seed demo events"
-    cmds: ["echo 'TODO(P1) - sluice seed is not implemented yet' && exit 1"]
   dev:worker:
     desc: "TODO(P2) run the worker locally"
     cmds: ["echo 'TODO(P2) - sluice worker is not implemented yet' && exit 1"]
