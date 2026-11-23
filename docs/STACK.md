@@ -78,11 +78,14 @@ sluice/
 │   ├── redisx/                # client, script loader; scripts/*.lua (embedded); keys/ = the only key-name builder
 │   ├── inventory/             # holds: Redis fast path + PG authority; naive/ (baseline only)
 │   ├── queue/                 # waiting room: join/status/claim, snapshot cache, controller
-│   ├── orders/                # order state machine, ConfirmOrder, quota
+│   ├── orders/                # order + payment state machines, ConfirmOrder, webhook inbox,
+│   │                          #   capture/void/refund, reconciler, live audit cache, HTTP routes
 │   ├── payments/              # MockPay client, webhook verification, naive/ (baseline only)
-│   ├── jobs/                  # River workers + periodic jobs (sweeper, reconciler)
-│   ├── mockpay/               # PSP simulator: intents, ledger, webhooks, faults, checkout page
-│   ├── stats/                 # live stats + live audit cache
+│   ├── jobs/                  # River clients (insert-only for the API, worker), workers, periodic
+│   │                          #   jobs (reconcile, audit_cache), retry backoff; the sweeper is a ticker
+│   ├── mockpay/               # PSP simulator: intents, ledger, webhooks, faults, checkout page;
+│   │                          #   migrations/ (own goose schema, applied at start-up), queries/, mpdb/ (sqlc)
+│   ├── stats/                 # live stats; reads the audit cache that orders.RefreshAuditCache writes
 │   ├── demo/                  # demo rush (bots) for live mode
 │   ├── rush/                  # swarm load generator + reporter
 │   ├── audit/                 # invariant auditor
@@ -169,6 +172,7 @@ sluice/
 | `MOCKPAY_API_KEY` | `dev-mockpay-key` | | |
 | `MOCKPAY_WEBHOOK_SECRET` | `dev-webhook-secret` | | |
 | `PUBLIC_WEBHOOK_URL` | `http://localhost:8080/api/v1/webhooks/mockpay` | `http://caddy:8000/api/v1/webhooks/mockpay` | Where MockPay delivers |
+| `PUBLIC_APP_URL` | `http://localhost:3000` | `http://localhost:8000` | Web app origin; the hosted checkout returns to `<PUBLIC_APP_URL>/order?o=<order_id>` (ADR 0007) |
 | `MOCKPAY_LATENCY_MS` | `20-60` | `20-60` | Uniform per call |
 | `MOCKPAY_FAIL_RATE` | `0` | `0.02` | Random 5xx before commit |
 | `MOCKPAY_TIMEOUT_AFTER_COMMIT_RATE` | `0` | `0.02` | Commit, then respond after `MOCKPAY_HANG_MS` |

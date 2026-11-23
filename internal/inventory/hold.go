@@ -354,6 +354,11 @@ func (s *Service) commit(ctx context.Context, ev *EventInfo, g grant, now time.T
 				if _, err := q.ReleaseSeats(ctx, gen.ReleaseSeatsParams{EventID: ev.ID, HoldID: p}); err != nil {
 					return fmt.Errorf("free taken-over hold: %w", err)
 				}
+				if s.reclaim != nil {
+					if err := s.reclaim(ctx, tx, p); err != nil {
+						return fmt.Errorf("reclaim hook: %w", err)
+					}
+				}
 				takeovers = append(takeovers, takeover{id: p, seats: old.SeatNos})
 			}
 		}
@@ -486,49 +491,81 @@ func (s *Service) Release(ctx context.Context, holdID, userID uuid.UUID) (Hold, 
 }
 
 // Extend moves an ACTIVE, unexpired hold to PAYMENT_PENDING with a new
-// expiry of now+ttl (P3: an order was created). Every seat must still be
-// HELD by this hold, or nothing changes and ErrHoldExpired is returned.
+// expiry of now+ttl, in its own transaction, then mirrors it into Redis.
+// Orders use ExtendInTx instead so the order insert and the extension
+// commit together.
 func (s *Service) Extend(ctx context.Context, holdID uuid.UUID, ttl time.Duration) (Hold, error) {
 	now := s.now()
 	exp := now.Add(ttl).Truncate(time.Millisecond) // ms: Redis and PG store the same instant
-	var row gen.Hold
+	var h Hold
 	err := db.WithTx(ctx, s.pg, func(tx pgx.Tx) error {
-		q := gen.New(tx)
 		var err error
-		if row, err = q.GetHoldForUpdate(ctx, holdID); errors.Is(err, pgx.ErrNoRows) {
-			return ErrHoldNotFound
-		} else if err != nil {
-			return fmt.Errorf("lock hold: %w", err)
-		}
-		n, err := q.MarkHoldPaymentPending(ctx, gen.MarkHoldPaymentPendingParams{ExpiresAt: exp, ID: holdID, Now: now})
-		if err != nil {
-			return fmt.Errorf("mark payment pending: %w", err)
-		}
-		if n != 1 {
-			if HoldStatus(row.Status) == HoldActive || HoldStatus(row.Status) == HoldExpired {
-				return fmt.Errorf("%w: hold %s", ErrHoldExpired, holdID)
-			}
-			return fmt.Errorf("%w: hold is %s", ErrHoldState, row.Status)
-		}
-		m, err := q.ExtendSeatHold(ctx, gen.ExtendSeatHoldParams{HeldUntil: exp, EventID: row.EventID, HoldID: holdID})
-		if err != nil {
-			return fmt.Errorf("extend seats: %w", err)
-		}
-		if m != int64(len(row.SeatNos)) {
-			return fmt.Errorf("%w: %d of %d seats still held", ErrHoldExpired, m, len(row.SeatNos))
-		}
-		row.Status, row.ExpiresAt = gen.HoldStatusPAYMENTPENDING, exp
-		return nil
+		h, err = s.ExtendInTx(ctx, gen.New(tx), holdID, exp, now)
+		return err
 	})
 	if err != nil {
 		return Hold{}, err
 	}
-	if !s.pgOnly {
-		if _, err := s.sc.Run(ctx, redisx.HoldExtend, extendKeys(row.EventID, holdID), holdID.String(), exp.UnixMilli()); err != nil {
-			s.log.WarnContext(ctx, "redis extend after PG extend", slog.String("error", err.Error()))
-		}
+	s.MirrorExtend(ctx, h.EventID, holdID, exp)
+	return h, nil
+}
+
+// ExtendInTx is Extend's PG half inside the caller's transaction: lock the
+// hold, ACTIVE -> PAYMENT_PENDING with expiry exp (only while unexpired at
+// now), and re-date every seat. Every seat must still be HELD by this hold,
+// or ErrHoldExpired is returned and the caller must roll back.
+func (s *Service) ExtendInTx(ctx context.Context, q *gen.Queries, holdID uuid.UUID, exp, now time.Time) (Hold, error) {
+	row, err := q.GetHoldForUpdate(ctx, holdID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Hold{}, ErrHoldNotFound
+	} else if err != nil {
+		return Hold{}, fmt.Errorf("lock hold: %w", err)
 	}
+	n, err := q.MarkHoldPaymentPending(ctx, gen.MarkHoldPaymentPendingParams{ExpiresAt: exp, ID: holdID, Now: now})
+	if err != nil {
+		return Hold{}, fmt.Errorf("mark payment pending: %w", err)
+	}
+	if n != 1 {
+		if HoldStatus(row.Status) == HoldActive || HoldStatus(row.Status) == HoldExpired {
+			return Hold{}, fmt.Errorf("%w: hold %s", ErrHoldExpired, holdID)
+		}
+		return Hold{}, fmt.Errorf("%w: hold is %s", ErrHoldState, row.Status)
+	}
+	m, err := q.ExtendSeatHold(ctx, gen.ExtendSeatHoldParams{HeldUntil: exp, EventID: row.EventID, HoldID: holdID})
+	if err != nil {
+		return Hold{}, fmt.Errorf("extend seats: %w", err)
+	}
+	if m != int64(len(row.SeatNos)) {
+		return Hold{}, fmt.Errorf("%w: %d of %d seats still held", ErrHoldExpired, m, len(row.SeatNos))
+	}
+	row.Status, row.ExpiresAt = gen.HoldStatusPAYMENTPENDING, exp
 	return holdFromRow(row), nil
+}
+
+// MirrorExtend copies a committed extension into Redis (hold_extend). Best
+// effort: the sweeper's Redis pass re-extends from PG if this fails.
+func (s *Service) MirrorExtend(ctx context.Context, eventID, holdID uuid.UUID, exp time.Time) {
+	if s.pgOnly {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sideEffectTimeout)
+	defer cancel()
+	if _, err := s.sc.Run(ctx, redisx.HoldExtend, extendKeys(eventID, holdID), holdID.String(), exp.UnixMilli()); err != nil {
+		s.log.WarnContext(ctx, "redis extend after PG extend", slog.String("error", err.Error()))
+	}
+}
+
+// MirrorRelease copies a committed release (order failed) into Redis
+// (hold_release). Best effort: the sweeper and the reconciler repair drift.
+func (s *Service) MirrorRelease(ctx context.Context, eventID, holdID uuid.UUID) {
+	if s.pgOnly {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sideEffectTimeout)
+	defer cancel()
+	if _, err := s.sc.Run(ctx, redisx.HoldRelease, releaseKeys(eventID, holdID), holdID.String()); err != nil {
+		s.log.WarnContext(ctx, "redis release after PG release", slog.String("error", err.Error()))
+	}
 }
 
 // Consume mirrors a committed confirm into Redis: the hold's seats move to

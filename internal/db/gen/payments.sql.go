@@ -53,6 +53,29 @@ func (q *Queries) FailPayment(ctx context.Context, id uuid.UUID) (int64, error) 
 	return result.RowsAffected(), nil
 }
 
+const getLivePayment = `-- name: GetLivePayment :one
+SELECT id, order_id, attempt, provider, provider_intent_id, psp_idempotency_key, amount_paise, status, created_at, updated_at FROM payments WHERE order_id = $1 AND status IN ('AUTHORIZED', 'CAPTURED')
+`
+
+// The order's AUTHORIZED or CAPTURED payment (at most one: I2 index).
+func (q *Queries) GetLivePayment(ctx context.Context, orderID uuid.UUID) (Payment, error) {
+	row := q.db.QueryRow(ctx, getLivePayment, orderID)
+	var i Payment
+	err := row.Scan(
+		&i.ID,
+		&i.OrderID,
+		&i.Attempt,
+		&i.Provider,
+		&i.ProviderIntentID,
+		&i.PspIdempotencyKey,
+		&i.AmountPaise,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const getPayment = `-- name: GetPayment :one
 SELECT id, order_id, attempt, provider, provider_intent_id, psp_idempotency_key, amount_paise, status, created_at, updated_at FROM payments WHERE id = $1
 `
@@ -205,10 +228,11 @@ func (q *Queries) SetPaymentIntent(ctx context.Context, arg SetPaymentIntentPara
 
 const voidPayment = `-- name: VoidPayment :execrows
 UPDATE payments SET status = 'VOIDED', updated_at = now()
-WHERE id = $1 AND status = 'AUTHORIZED'
+WHERE id = $1 AND status IN ('CREATED', 'AUTHORIZED')
 `
 
-// AUTHORIZED -> VOIDED.
+// AUTHORIZED -> VOIDED, or CREATED -> VOIDED when the PSP had authorized the
+// intent but SLUICE never recorded it before voiding (ADR 0007).
 func (q *Queries) VoidPayment(ctx context.Context, id uuid.UUID) (int64, error) {
 	result, err := q.db.Exec(ctx, voidPayment, id)
 	if err != nil {

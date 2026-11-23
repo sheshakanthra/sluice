@@ -30,9 +30,10 @@ UPDATE payments SET status = 'CAPTURED', updated_at = now()
 WHERE id = @id AND status = 'AUTHORIZED';
 
 -- name: VoidPayment :execrows
--- AUTHORIZED -> VOIDED.
+-- AUTHORIZED -> VOIDED, or CREATED -> VOIDED when the PSP had authorized the
+-- intent but SLUICE never recorded it before voiding (ADR 0007).
 UPDATE payments SET status = 'VOIDED', updated_at = now()
-WHERE id = @id AND status = 'AUTHORIZED';
+WHERE id = @id AND status IN ('CREATED', 'AUTHORIZED');
 
 -- name: FailPayment :execrows
 -- CREATED -> FAILED (declined).
@@ -43,3 +44,7 @@ WHERE id = @id AND status = 'CREATED';
 -- CAPTURED -> REFUNDED.
 UPDATE payments SET status = 'REFUNDED', updated_at = now()
 WHERE id = @id AND status = 'CAPTURED';
+
+-- name: GetLivePayment :one
+-- The order's AUTHORIZED or CAPTURED payment (at most one: I2 index).
+SELECT * FROM payments WHERE order_id = $1 AND status IN ('AUTHORIZED', 'CAPTURED');

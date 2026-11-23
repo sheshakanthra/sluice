@@ -77,7 +77,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return runService(ctx, stdout, stderr, app.SeedFunc(opts))
 	case "worker":
 		return runService(ctx, stdout, stderr, app.RunWorker)
-	case "mockpay", "rush", "audit":
+	case "mockpay":
+		return runService(ctx, stdout, stderr, app.RunMockpay)
+	case "rush", "audit":
 		_, _ = fmt.Fprintf(stderr, "sluice %s: %s\n", cmd, notImplPhase)
 		return exitUsage
 	default:

@@ -110,7 +110,7 @@ sequenceDiagram
   API->>M: POST /v1/intents (key order:ID:attempt:1)
   API-->>U: order + checkout_url
   alt hosted checkout (UI)
-    U->>M: pay on /pay/checkout/{intent}
+    U->>M: pay on /checkout/{intent} (form POST /checkout/{intent}/pay)
     M-->>U: 303 back to the app
     U->>API: POST /orders/{id}/confirm
   else saved method (swarm, tests, quick-pay)
@@ -125,22 +125,28 @@ sequenceDiagram
 ```
 
 **ConfirmOrder(orderID)** is the single convergence point, and it's idempotent:
-1. Outside any transaction, read the order and the current attempt. If the payment isn't AUTHORIZED in our DB, `GET` the intent from MockPay. If it's still `requires_payment`, return PENDING. If it `failed`, mark the payment FAILED and return.
-2. **Transaction A:** `SELECT order FOR UPDATE`. If already CONFIRMED, return it (replay). Under that lock, check whether another attempt of this order is already live. If one is, this authorization is a duplicate: enqueue `void_payment` for it, count `duplicate_charges_prevented_total`, and return the order. Otherwise mark this payment AUTHORIZED. The partial unique index is the backstop: a violation aborts the tx and the job retries into the "already live" branch. `SELECT hold FOR UPDATE`, which must be ACTIVE or PAYMENT_PENDING. Run `UPDATE seats SET state='SOLD', order_id=$o, hold_id=NULL, held_until=NULL, version=version+1 WHERE event_id=$e AND seat_no = ANY($s) AND state='HELD' AND hold_id=$h`; the row count must equal n. Insert the tickets, upsert `event_user_quota` (its CHECK enforces I4), set order → CONFIRMED and hold → CONSUMED, and insert `capture_payment` with River `InsertTx`. Commit.
+1. Outside any transaction, read the order and its attempts. For every attempt still CREATED in our DB that has an intent, `GET` the intent from MockPay and sync it: `requires_payment` → nothing (PENDING); `authorized` → transaction A; `captured` (a capture we missed) → A, then mark CAPTURED; `failed` → payment FAILED; `canceled` → payment VOIDED if the ledger ever authorized it, else FAILED; `refunded` → REFUNDED. Webhook-driven calls skip a regression (an event ranked below the payment's current status, e.g. `authorized` after `captured`) and count it as `regression_ignored`.
+2. **Transaction A:** `SELECT order FOR UPDATE`. If already CONFIRMED with this payment live, return it (replay). Under that lock, check whether another attempt of this order is already live. If one is, this authorization is a duplicate. It can't become a second live payment (the partial unique index forbids it), so enqueue `void_payment` for it, count `duplicate_charges_prevented_total`, and return the order. If the order is already terminal (FAILED/EXPIRED) and no attempt is live, this authorization arrived late: record it AUTHORIZED, enqueue `void_payment`, and return (ADR 0007). Otherwise mark this payment AUTHORIZED. The partial unique index is the backstop: a violation aborts the tx and the job retries into the "already live" branch. `SELECT hold FOR UPDATE`, which must be ACTIVE or PAYMENT_PENDING. Run `UPDATE seats SET state='SOLD', order_id=$o, hold_id=NULL, held_until=NULL, version=version+1 WHERE event_id=$e AND seat_no = ANY($s) AND state='HELD' AND hold_id=$h`; the row count must equal n. Insert the tickets, upsert `event_user_quota` (its CHECK enforces I4), set order → CONFIRMED and hold → CONSUMED, and insert `capture_payment` with River `InsertTx`. Commit.
 3. If any check in A fails: roll back. **Transaction B:** order → FAILED (`HOLD_LOST` or `QUOTA_EXCEEDED`), hold → RELEASED if it's still ours, enqueue `void_payment`. The user sees "Payment cancelled: you were not charged."
 4. After commit, best effort in Redis: `hold_consume.lua` (or `hold_release.lua`). The sweeper and reconciler repair any drift.
 
 ### 4.4 Expiry, and the late-payment race
 - Each **sweeper** tick (every 1 s, in the worker, safe to run concurrently):
   1. `ZRANGEBYSCORE holds -inf now LIMIT 200` in Redis, plus `holds_expiry_idx` in PG for holds Redis doesn't know about.
-  2. For each hold, run a PG tx: `UPDATE holds SET status='EXPIRED' WHERE id=$h AND status IN ('ACTIVE','PAYMENT_PENDING') AND expires_at < now()`. If 1 row changed, free its seats (`WHERE hold_id=$h AND state='HELD'`), expire its order if one exists, and enqueue `void_payment` if a payment was authorized.
+  2. For each hold, run a PG tx: `UPDATE holds SET status='EXPIRED' WHERE id=$h AND status IN ('ACTIVE','PAYMENT_PENDING') AND expires_at < now()`. If 1 row changed, free its seats (`WHERE hold_id=$h AND state='HELD'`) and call the orders **reclaim hook** in the same transaction (a takeover of an expired hold by a new hold calls it too). The hook locks the hold's order with `FOR UPDATE SKIP LOCKED` (a ConfirmOrder holding the order lock is mid-flight and will itself see the hold gone, so there is no lock-order deadlock) and settles it (ADR 0007):
+     - every attempt that may hold money gets `void_payment` (CREATED with an intent, or AUTHORIZED) or `refund_payment` (CAPTURED); the order stays PENDING_PAYMENT until those land;
+     - once nothing is pending, the order becomes **FAILED `HOLD_LOST`** if money was ever authorized for it, otherwise **EXPIRED**. An order with no intent at all expires at once.
+     The void/refund jobs and ConfirmOrder call the same settle step after they finish, so the order reaches its terminal state whichever runs last.
   3. Then `hold_release.lua` in Redis. If PG says the hold was extended, use `hold_extend.lua`. If PG says it's consumed, use `hold_consume.lua`.
-- **The race:** the authorization webhook lands just as the sweeper expires a PAYMENT_PENDING hold. Both run in PG transactions on the same rows. If the sweeper commits first, the hold is EXPIRED, ConfirmOrder's conditional update hits 0 rows, the payment is voided and the user wasn't charged. If confirm commits first, the hold is CONSUMED and the sweeper's conditional update hits 0 rows (no-op). Either outcome is correct, and a property test covers both orders.
+- **The race:** the authorization webhook lands just as the sweeper expires a PAYMENT_PENDING hold. Both run in PG transactions on the same rows. If the sweeper commits first, the hold is EXPIRED, ConfirmOrder finds the hold gone, the payment is voided, the order ends FAILED `HOLD_LOST`, and the user wasn't charged. If confirm commits first, the hold is CONSUMED and the sweeper's conditional update hits 0 rows (no-op). Either outcome is correct. `TestConfirmSweeperRace` runs both concurrently, `TestHoldReclaimedBeforeAuthorization` covers both job orders, and the rapid property test interleaves them at random.
 
 ### 4.5 Reconciliation (worker, every 30 s; the auditor can also trigger it)
-- MockPay intents that are authorized or captured but whose order isn't CONFIRMED, older than 30 s → void (if authorized) or refund (if captured). Count `orphans_fixed_total`.
+- MockPay intents that are authorized or captured, last updated more than 30 s ago:
+  - order still PENDING_PAYMENT → not an orphan yet (lost webhook, no client pull): attach the intent id if a crash lost it, then ConfirmOrder (counted as `converged`);
+  - order CONFIRMED with this intent as its live payment → fine;
+  - otherwise (no order, a terminal order, or a CONFIRMED order paid by another attempt) → void (if authorized) or refund (if captured), count `orphans_fixed_total` (and `duplicate_charges_prevented_total` for the CONFIRMED-by-another-attempt case).
 - CONFIRMED orders whose payment has been AUTHORIZED for more than 60 s → re-enqueue capture.
-- PENDING_PAYMENT orders whose hold is gone → EXPIRED, plus void.
+- PENDING_PAYMENT orders whose hold is gone → settled as in §4.4 (voids, then FAILED `HOLD_LOST` or EXPIRED).
 - Redis ↔ PG inventory diff → repair Redis from PG (log every fix with a metric).
 
 ## 5. Admission controller

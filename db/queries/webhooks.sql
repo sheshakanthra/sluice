@@ -13,3 +13,6 @@ WHERE provider = @provider AND event_id = @event_id AND processed_at IS NULL;
 -- name: ListUnprocessedWebhooks :many
 SELECT * FROM webhook_events WHERE processed_at IS NULL
 ORDER BY received_at LIMIT @batch_size;
+
+-- name: GetWebhookEvent :one
+SELECT * FROM webhook_events WHERE provider = @provider AND event_id = @event_id;

@@ -83,14 +83,17 @@ type env struct {
 type envOpt func(*envConfig)
 
 type envConfig struct {
-	capacity int
-	ttl      time.Duration
-	pgOnly   bool
+	capacity  int
+	ttl       time.Duration
+	pgOnly    bool
+	onReclaim inventory.ReclaimHook
 }
 
 func capacity(n int) envOpt      { return func(c *envConfig) { c.capacity = n } }
 func ttl(d time.Duration) envOpt { return func(c *envConfig) { c.ttl = d } }
 func pgOnly(b bool) envOpt       { return func(c *envConfig) { c.pgOnly = b } }
+
+func onReclaim(h inventory.ReclaimHook) envOpt { return func(c *envConfig) { c.onReclaim = h } }
 
 func mustNil(t testing.TB, err error) {
 	t.Helper()
@@ -117,7 +120,7 @@ func newEnv(t *testing.T, opts ...envOpt) *env {
 	m, err := inventory.NewMetrics(reg)
 	mustNil(t, err)
 	svc, err := inventory.NewService(pool, rdb, sc, inventory.Options{
-		HoldTTL: cfg.ttl, MaxSeats: 4, PGOnly: cfg.pgOnly, Metrics: m,
+		HoldTTL: cfg.ttl, MaxSeats: 4, PGOnly: cfg.pgOnly, Metrics: m, OnReclaim: cfg.onReclaim,
 	})
 	mustNil(t, err)
 	e := &env{t: t, ctx: ctx, pool: pool, q: gen.New(pool), rdb: rdb, sc: sc, svc: svc, reg: reg,

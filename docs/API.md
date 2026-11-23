@@ -85,7 +85,7 @@ The client-observable outcomes of a rush (sold out, taken, rate-limited) are **n
 | POST | `/api/v1/admin/events/{eventId}/reset` | admin | | Reset the event (demo/test) |
 | POST | `/api/v1/admin/events/{eventId}/rebuild-cache` | admin | | Rebuild Redis from PG (R1) |
 | POST | `/api/v1/admin/events/{eventId}/open-sale` | admin | | `{ "opens_in_s": 30 }` sets T0 = now + N |
-| POST | `/api/v1/admin/reconcile` | admin | | Run reconciliation now (the auditor's settle step) |
+| POST | `/api/v1/admin/reconcile` | admin | | Run reconciliation now (the auditor's settle step), synchronously → 200 `{orphans_fixed, duplicates_fixed, converged, captures_requeued, dead_holds_settled, inventory_repaired}`; 503 if a step failed |
 | POST | `/api/v1/demo/rush` | — (rate-limited) | | Demo mode only: `{ "bots": 2000, "opens_in_s": 20 }` → 202 |
 | POST | `/api/v1/test/admit` | — | | Test/rush only: `{ "event_id", "user_id" }` → admission token |
 
@@ -142,16 +142,20 @@ Errors: `SEATS_TAKEN{taken}`, `INSUFFICIENT_SEATS{available}`, `SOLD_OUT`, `HOLD
 // response
 { "order_id": "0193...", "status": "PENDING_PAYMENT", "amount_paise": 250000, "currency": "INR",
   "seat_nos": [212, 213], "hold_expires_at": "2026-11-22T04:40:12Z",
-  "payment": { "attempt": 1, "intent_id": "pi_...", "checkout_url": "http://localhost:8000/pay/checkout/pi_..." } }
+  "payment": { "attempt": 1, "status": "CREATED", "intent_id": "pi_...", "checkout_url": "http://localhost:8000/pay/checkout/pi_..." },
+  "charged": false, "tickets": [], "failure_code": null }
 ```
-Creating the order moves the hold to PAYMENT_PENDING with `PAYMENT_HOLD_TTL`. A retry with the same IK replays, and a second order for the same hold returns the existing order (`hold_id` is unique).
+Creating the order moves the hold to PAYMENT_PENDING with `PAYMENT_HOLD_TTL`. A retry with the same IK replays, and a second order for the same hold returns the existing order (`hold_id` is unique). `checkout_url` is `MOCKPAY_PUBLIC_URL + "/checkout/" + intent_id` and is present only while the order is PENDING_PAYMENT and the attempt is CREATED. With `QUEUE_ENFORCED=true` this route needs the admission token for the hold's event (another event's token: 401 `TOKEN_INVALID`); otherwise a session token also works.
+
+Every order route (`POST /orders`, `/pay`, `/payments`, `/confirm`, `GET /orders/{id}`) returns this same order view. `/payments` (new attempt) needs the last attempt FAILED or VOIDED, the hold live, and at most 3 attempts (else 409 `ORDER_STATE` / 409 `HOLD_EXPIRED` / 422 `PAYMENT_ATTEMPTS_EXHAUSTED`). A PSP that is down gives 503 `DEPENDENCY_UNAVAILABLE` with `Retry-After`; the Idempotency-Key is released, so the retry runs again with the same deterministic PSP keys.
 
 ### 3.6 `POST /orders/{id}/pay` (IK) → 200
 ```json
 // request
 { "payment_method": "pm_ok" }
 // response
-{ "order_id": "...", "status": "CONFIRMED", "tickets": [ { "seat_no": 212, "label": "C5-13", "code": "SLC-7Q4K-92XM" } ] }
+{ "order_id": "...", "status": "CONFIRMED", "charged": true, "payment": { "attempt": 1, "status": "AUTHORIZED", "intent_id": "pi_..." },
+  "tickets": [ { "seat_no": 212, "label": "C5-13", "code": "SLC-7Q4K-92XM" } ], ... }
 ```
 `payment_method` is one of `pm_ok | pm_decline | pm_timeout | pm_slow`. The status can come back `CONFIRMED`, `PENDING_PAYMENT` (the PSP is still processing, so poll `/confirm`), or `FAILED` with `failure_code` and `charged: false`.
 
@@ -161,7 +165,7 @@ Creating the order moves the hold to PAYMENT_PENDING with `PAYMENT_HOLD_TTL`. A 
   "payment": { "attempt": 1, "status": "CAPTURED" }, "charged": true,
   "tickets": [ ... ], "failure_code": null, "hold_expires_at": "..." }
 ```
-`charged` is true only when a payment is AUTHORIZED or CAPTURED and not voided or refunded. The UI uses it for the "you were not charged" guarantee.
+`charged` is true only when a payment is AUTHORIZED or CAPTURED and not voided or refunded. The UI uses it for the "you were not charged" guarantee. `payment` is the live attempt if there is one, else the latest attempt. Another user's order is 404.
 
 ### 3.8 `GET /events/{id}/availability` → 200 / 304
 ```json
@@ -203,7 +207,9 @@ The §3.10 object plus `"layout"` (the descriptor in DATA-MODEL §7). `{eventId}
 - `MockPay-Signature: t=<unix>,v1=<hex(hmac_sha256(MOCKPAY_WEBHOOK_SECRET, t + "." + raw_body))>`
 - `MockPay-Event-Id: evt_...`
 
-Verification uses a constant-time compare and a tolerance of |now − t| ≤ 300 s. A bad signature gets 400 and is counted. Then, in one tx: insert into `webhook_events` (a conflict means a duplicate: return 200 and do nothing) and enqueue `process_webhook`. Respond 200 fast.
+Verification uses a constant-time compare and a tolerance of |now − t| ≤ 300 s; several `v1=` values are accepted (secret rotation). A bad signature gets 400 `VALIDATION` and is counted as `webhooks_total{type="unknown",result="bad_signature"}`. A body over 64 KiB, a body that is not a MockPay event, or a `MockPay-Event-Id` that differs from the body's `id` also gets 400. Then, in one tx: insert into `webhook_events` (a conflict means a duplicate: return 200 `{"received":true}`, count `result="duplicate"`, do nothing) and enqueue `process_webhook` (unique per inbox event). Respond 200 fast.
+
+`process_webhook` results (`webhooks_total{type,result}`): `processed`; `regression_ignored` (the event ranks below the payment's current status, e.g. `authorized` after `captured`); `unknown_intent` (no payment has this intent: the reconciler handles any money).
 
 Body:
 ```json
@@ -222,15 +228,18 @@ Types: `intent.authorized`, `intent.failed`, `intent.captured`, `intent.canceled
 | POST | `/v1/intents/{id}/capture` | IK. Idempotent per intent (`UNIQUE(intent_id, kind)`) |
 | POST | `/v1/intents/{id}/void` | IK |
 | POST | `/v1/intents/{id}/refund` | IK |
-| GET | `/v1/ledger/summary?metadata.event_id=&since=` | For the auditor: per merchant_ref `{intents, authorized, captured, refunded}` |
+| GET | `/v1/ledger/summary?metadata.event_id=&since=` | For the auditor: `{"refs": [{merchant_ref, intents, authorized, captured, voided, refunded}]}`, counts of intents with each ledger entry kind |
 | GET | `/checkout/{id}` | Hosted page with a **TEST MODE** banner. Buttons: Pay (pm_ok), Decline (pm_decline), Simulate timeout (pm_timeout) |
-| POST | `/checkout/{id}/pay` | Form or JSON `{payment_method}` → authorize and 303 to `return_url?order=...` |
+| POST | `/checkout/{id}/pay` | Form or JSON `{payment_method}` → authorize and 303 to `return_url` with `order=<merchant_ref>&intent=<id>&status=<intent status>` added (SLUICE's own `return_url` already carries `o=<order_id>` for the web page). Internal key `checkout:<id>:<method>`, so a double click replays |
 | GET | `/metrics`, `/healthz` | |
 
 MockPay semantics:
 - The same IK with the same body replays the stored response; the same IK with a different body gets 422.
 - `pm_timeout` and `MOCKPAY_TIMEOUT_AFTER_COMMIT_RATE` **commit first, then respond after `MOCKPAY_HANG_MS`**. That's the classic double-charge trap.
 - Webhooks are delivered at least once with retries (0, 1, 2, 4, 8, 16 s; 6 attempts), with optional duplicates, reordering and delay according to the fault env vars.
-- In test mode, the header `X-MockPay-Fault: timeout_after_commit|fail|dup_webhook|reorder_webhook` forces a fault deterministically.
+- In test mode, the header `X-MockPay-Fault: timeout_after_commit|fail|dup_webhook|reorder_webhook` forces a fault deterministically. It is honoured only when `APP_ENV` is `rush` or `test`. `fail` answers 503 before anything commits (the key is not stored, so a retry runs).
+- State-level no-ops (ADR 0007): confirming an authorized/captured intent, voiding a canceled/failed one, or refunding a refunded one returns the intent unchanged. Voiding a `requires_payment` intent cancels it with no ledger entry. Other invalid transitions are 409 `intent_state` with the current intent in the body.
+- Intents carry `authorized: true|false` (the ledger has an `AUTH` entry), so a canceled intent tells whether money was ever held.
+- The ledger is append-only in the database (a trigger rejects UPDATE, DELETE and TRUNCATE).
 
 The SLUICE PSP client uses a **2 s** timeout per call, retries ≤ 3 with jittered backoff, and always the same deterministic key: `order:<order_id>:attempt:<n>` to create, `confirm:<intent_id>`, `capture:<intent_id>`, `void:<intent_id>`, `refund:<intent_id>`.

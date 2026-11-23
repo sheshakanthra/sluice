@@ -122,6 +122,7 @@ type Config struct {
 	MockpayAPIKey                 string
 	MockpayWebhookSecret          string
 	PublicWebhookURL              string
+	PublicAppURL                  string
 	MockpayLatencyMS              IntRange
 	MockpayFailRate               float64
 	MockpayTimeoutAfterCommitRate float64
@@ -185,6 +186,7 @@ func Load(lookup LookupFunc) (*Config, error) {
 	c.MockpayAPIKey = r.secret("MOCKPAY_API_KEY", "dev-mockpay-key", 8)
 	c.MockpayWebhookSecret = r.secret("MOCKPAY_WEBHOOK_SECRET", "dev-webhook-secret", 8)
 	c.PublicWebhookURL = r.url("PUBLIC_WEBHOOK_URL", "http://localhost:8080/api/v1/webhooks/mockpay", "http", "https")
+	c.PublicAppURL = r.url("PUBLIC_APP_URL", "http://localhost:3000", "http", "https")
 	c.MockpayLatencyMS = r.intRange("MOCKPAY_LATENCY_MS", "20-60")
 	c.MockpayFailRate = r.floatIn("MOCKPAY_FAIL_RATE", 0, 0, 1)
 	c.MockpayTimeoutAfterCommitRate = r.floatIn("MOCKPAY_TIMEOUT_AFTER_COMMIT_RATE", 0, 0, 1)

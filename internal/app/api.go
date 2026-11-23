@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
@@ -24,7 +25,9 @@ import (
 	"github.com/sheshakanthra/sluice/internal/events"
 	"github.com/sheshakanthra/sluice/internal/httpx"
 	"github.com/sheshakanthra/sluice/internal/inventory"
+	"github.com/sheshakanthra/sluice/internal/jobs"
 	"github.com/sheshakanthra/sluice/internal/obs"
+	"github.com/sheshakanthra/sluice/internal/orders"
 	"github.com/sheshakanthra/sluice/internal/redisx"
 )
 
@@ -68,10 +71,24 @@ func APIHandler(ctx context.Context, d Deps) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
-	inv, err := newInventory(ctx, d.Config, d.Log, d.Registry, d.PG, d.Redis)
+	var ord *orders.Service // the reclaim hook needs the orders service, which needs inventory
+	inv, err := newInventory(ctx, d.Config, d.Log, d.Registry, d.PG, d.Redis,
+		func(ctx context.Context, tx pgx.Tx, hid uuid.UUID) error { return ord.OnReclaim(ctx, tx, hid) })
 	if err != nil {
 		return nil, err
 	}
+	ins, err := jobs.NewInsertClient(d.PG, d.Log)
+	if err != nil {
+		return nil, err
+	}
+	if ord, err = newOrders(d.Config, d.Log, d.Registry, d.PG, d.Redis, inv, ins); err != nil {
+		return nil, err
+	}
+	replays, err := httpx.NewReplayCounter(d.Registry)
+	if err != nil {
+		return nil, err
+	}
+	idem := httpx.NewIdempotency(gen.New(d.PG), auth.UserID, d.Log, nil).WithReplays(replays)
 	avail := inv.NewAvailabilityCache(availabilityMinAge)
 	q := gen.New(d.PG)
 
@@ -98,8 +115,12 @@ func APIHandler(ctx context.Context, d Deps) (http.Handler, error) {
 	}
 	inventory.RegisterRoutes(rt, inventory.HandlerDeps{
 		Svc: inv, Avail: avail, Keys: keyring,
-		Idem:          httpx.NewIdempotency(q, auth.UserID, d.Log, nil),
+		Idem:          idem,
 		QueueEnforced: d.Config.QueueEnforced, AdminToken: d.Config.AdminToken, Log: d.Log,
+	})
+	orders.RegisterRoutes(rt, orders.HandlerDeps{
+		Svc: ord, Keys: keyring, Idem: idem, QueueEnforced: d.Config.QueueEnforced,
+		AdminToken: d.Config.AdminToken, WebhookSecret: d.Config.MockpayWebhookSecret, Log: d.Log,
 	})
 
 	m := httpx.NewHTTPMetrics(d.Registry, "api")

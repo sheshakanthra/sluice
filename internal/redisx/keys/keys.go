@@ -59,3 +59,7 @@ func QActive(eid uuid.UUID) string { return k(eid, "q:active") }
 // RebuildLock is a short SET NX lock so only one process rebuilds an
 // event's inventory at a time (DATA-MODEL §6).
 func RebuildLock(eid uuid.UUID) string { return k(eid, "rebuild_lock") }
+
+// Audit is the live audit cache hash (oversold, duplicates, orphans,
+// tickets, at_ms), refreshed every 5 s by the worker (P3, read by /stats).
+func Audit(eid uuid.UUID) string { return k(eid, "audit") }

@@ -40,6 +40,7 @@ func TestPaymentStateMachine(t *testing.T) {
 			{From: "CAPTURED", To: "REFUNDED"},
 			{From: "CREATED", To: "FAILED"},
 			{From: "AUTHORIZED", To: "VOIDED"},
+			{From: "CREATED", To: "VOIDED"}, // authorized at the PSP, voided before SLUICE recorded it (ADR 0007)
 		},
 		Initial: PaymentCreated,
 		Events: []fsmtest.Event[PaymentStatus]{

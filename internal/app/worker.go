@@ -6,13 +6,17 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/sheshakanthra/sluice/internal/config"
 	"github.com/sheshakanthra/sluice/internal/db"
 	"github.com/sheshakanthra/sluice/internal/db/gen"
 	"github.com/sheshakanthra/sluice/internal/httpx"
+	"github.com/sheshakanthra/sluice/internal/jobs"
 	"github.com/sheshakanthra/sluice/internal/obs"
+	"github.com/sheshakanthra/sluice/internal/orders"
 )
 
 // idempotencyGCInterval: keys live 24 h, so an hourly sweep is plenty.
@@ -20,8 +24,10 @@ const idempotencyGCInterval = time.Hour
 
 // RunWorker runs `sluice worker`: the hold sweeper (which also loads any
 // event whose Redis inventory is missing, so start-up loads every open
-// event), the idempotency-key GC, and a health/metrics server on
-// WORKER_HTTP_ADDR. Admission ticks and River jobs arrive in P3/P4.
+// event, and settles the orders of reclaimed holds), the River jobs
+// (process_webhook, capture/void/refund, the periodic reconciler and live
+// audit cache), the idempotency-key GC, and a health/metrics server on
+// WORKER_HTTP_ADDR. Admission ticks arrive in P4.
 func RunWorker(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 	log = log.With(slog.String("svc", "worker"))
 
@@ -42,7 +48,20 @@ func RunWorker(ctx context.Context, cfg *config.Config, log *slog.Logger) error 
 	defer func() { _ = rdb.Close() }()
 
 	reg := obs.NewRegistry()
-	inv, err := newInventory(ctx, cfg, log, reg, pg, rdb)
+	var ord *orders.Service // the reclaim hook needs the orders service, which needs inventory
+	inv, err := newInventory(ctx, cfg, log, reg, pg, rdb,
+		func(ctx context.Context, tx pgx.Tx, hid uuid.UUID) error { return ord.OnReclaim(ctx, tx, hid) })
+	if err != nil {
+		return fmt.Errorf("worker: %w", err)
+	}
+	ins, err := jobs.NewInsertClient(pg, log)
+	if err != nil {
+		return fmt.Errorf("worker: %w", err)
+	}
+	if ord, err = newOrders(cfg, log, reg, pg, rdb, inv, ins); err != nil {
+		return fmt.Errorf("worker: %w", err)
+	}
+	rc, err := jobs.NewWorkerClient(pg, ord, jobs.Config{ReconcileInterval: cfg.ReconcileInterval, Log: log})
 	if err != nil {
 		return fmt.Errorf("worker: %w", err)
 	}
@@ -60,10 +79,23 @@ func RunWorker(ctx context.Context, cfg *config.Config, log *slog.Logger) error 
 	g.Go(func() error { return httpx.Serve(gctx, srv, log, nil) })
 	g.Go(func() error { return inv.RunSweeper(gctx, cfg.SweeperInterval) })
 	g.Go(func() error { return runIdempotencyGC(gctx, gen.New(pg), log) })
+	g.Go(func() error {
+		if err := rc.Start(gctx); err != nil {
+			return fmt.Errorf("river start: %w", err)
+		}
+		<-gctx.Done()
+		sctx, cancel := context.WithTimeout(context.WithoutCancel(gctx), 10*time.Second)
+		defer cancel()
+		if err := rc.Stop(sctx); err != nil {
+			log.WarnContext(sctx, "river stop", slog.String("error", err.Error()))
+		}
+		return nil
+	})
 	if ps := obs.NewPprofServer(cfg.PprofAddr); ps != nil {
 		g.Go(func() error { return httpx.Serve(gctx, ps, log.With(slog.String("server", "pprof")), nil) })
 	}
 	log.InfoContext(ctx, "worker started", slog.Duration("sweeper_interval", cfg.SweeperInterval),
+		slog.Duration("reconcile_interval", cfg.ReconcileInterval),
 		slog.String("hold_path", string(cfg.HoldPath)))
 	if err := g.Wait(); err != nil {
 		return fmt.Errorf("worker: %w", err)

@@ -58,7 +58,7 @@ tasks:
       - go run -ldflags "{{.LDFLAGS}}" ./cmd/sluice api
 
   dev:worker:
-    desc: "Run the worker locally: hold sweeper (SWEEPER_INTERVAL), Redis inventory loader, health/metrics on WORKER_HTTP_ADDR"
+    desc: "Run the worker locally: hold sweeper (SWEEPER_INTERVAL), Redis inventory loader, River jobs (webhooks, capture/void/refund, reconciler, audit cache), health/metrics on WORKER_HTTP_ADDR"
     cmds:
       - go run -ldflags "{{.LDFLAGS}}" ./cmd/sluice worker
 
@@ -141,8 +141,9 @@ tasks:
 
   # ---------- later phases (stubs) ----------
   dev:mockpay:
-    desc: "TODO(P3) run MockPay locally"
-    cmds: ["echo 'TODO(P3) - sluice mockpay is not implemented yet' && exit 1"]
+    desc: "Run MockPay locally on MOCKPAY_HTTP_ADDR (default :8090); migrates its own database (MOCKPAY_DATABASE_URL) first"
+    cmds:
+      - go run -ldflags "{{.LDFLAGS}}" ./cmd/sluice mockpay
   stack:up:
     desc: "TODO(P5) full stack behind Caddy on :8000"
     cmds: ["echo 'TODO(P5) - full stack is not implemented yet' && exit 1"]

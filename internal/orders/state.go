@@ -1,6 +1,7 @@
-// Package orders owns orders and payments. This file holds the pure order and
-// payment state machines from docs/DATA-MODEL.md section 3; ConfirmOrder and
-// the quota logic arrive in P3.
+// Package orders owns orders and payments: order creation, the PSP calls,
+// ConfirmOrder (the single convergence point, ARCHITECTURE §4.3), the
+// webhook inbox, the payment jobs and the reconciler. This file holds the
+// pure order and payment state machines from docs/DATA-MODEL.md section 3.
 package orders
 
 import "github.com/sheshakanthra/sluice/internal/fsm"
@@ -50,6 +51,8 @@ var OrderMachine = fsm.New("order",
 //	CREATED -authorized-> AUTHORIZED -captured-> CAPTURED -refund-> REFUNDED
 //	CREATED -declined-> FAILED
 //	AUTHORIZED -void-> VOIDED
+//	CREATED -void-> VOIDED (the PSP authorized it, SLUICE voided it before
+//	                        recording the authorization; ADR 0007)
 var PaymentMachine = fsm.New("payment",
 	[]PaymentStatus{PaymentCreated, PaymentAuthorized, PaymentCaptured, PaymentVoided, PaymentFailed, PaymentRefunded},
 	[]fsm.Edge[PaymentStatus]{
@@ -58,6 +61,7 @@ var PaymentMachine = fsm.New("payment",
 		{From: PaymentCaptured, To: PaymentRefunded},
 		{From: PaymentCreated, To: PaymentFailed},
 		{From: PaymentAuthorized, To: PaymentVoided},
+		{From: PaymentCreated, To: PaymentVoided},
 	})
 
 // CanTransition reports whether an order may move from -> to.
@@ -108,7 +112,24 @@ func (p PaymentStatus) Decline() (PaymentStatus, error) {
 	return PaymentMachine.Transition(p, PaymentFailed)
 }
 
-// Void is AUTHORIZED -> VOIDED.
+// Rank orders payment states for webhook handling: an event whose state
+// ranks below the payment's current state is a regression and is ignored
+// (DATA-MODEL §3: transitions only move forward).
+func (p PaymentStatus) Rank() int {
+	switch p {
+	case PaymentCreated:
+		return 0
+	case PaymentAuthorized, PaymentFailed:
+		return 1
+	case PaymentCaptured, PaymentVoided:
+		return 2
+	case PaymentRefunded:
+		return 3
+	}
+	return -1
+}
+
+// Void is AUTHORIZED -> VOIDED (or CREATED -> VOIDED, see PaymentMachine).
 func (p PaymentStatus) Void() (PaymentStatus, error) {
 	return PaymentMachine.Transition(p, PaymentVoided)
 }

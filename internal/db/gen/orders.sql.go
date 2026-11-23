@@ -7,9 +7,46 @@ package gen
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
+
+const auditCounts = `-- name: AuditCounts :one
+SELECT
+  ((SELECT count(*) FROM (SELECT t.seat_no FROM tickets t WHERE t.event_id = $1
+                          GROUP BY t.seat_no HAVING count(*) > 1) x)
+   + GREATEST((SELECT count(*) FROM tickets t WHERE t.event_id = $1)
+              - (SELECT e.capacity FROM events e WHERE e.id = $1)::bigint, 0))::bigint AS oversold,
+  (SELECT count(*) FROM (SELECT p.order_id FROM payments p JOIN orders o ON o.id = p.order_id
+                         WHERE o.event_id = $1 AND p.status = 'CAPTURED'
+                         GROUP BY p.order_id HAVING count(*) > 1) d)::bigint AS duplicates,
+  (SELECT count(*) FROM payments p JOIN orders o ON o.id = p.order_id
+   WHERE o.event_id = $1 AND p.status IN ('AUTHORIZED', 'CAPTURED') AND o.status <> 'CONFIRMED')::bigint AS orphans,
+  (SELECT count(*) FROM tickets t WHERE t.event_id = $1)::bigint AS tickets
+`
+
+type AuditCountsRow struct {
+	Oversold   int64
+	Duplicates int64
+	Orphans    int64
+	Tickets    int64
+}
+
+// Live audit cache (every 5 s per ON_SALE event): oversold seats, orders
+// with more than one captured payment, and live payments on orders that are
+// not CONFIRMED.
+func (q *Queries) AuditCounts(ctx context.Context, eventID uuid.UUID) (AuditCountsRow, error) {
+	row := q.db.QueryRow(ctx, auditCounts, eventID)
+	var i AuditCountsRow
+	err := row.Scan(
+		&i.Oversold,
+		&i.Duplicates,
+		&i.Orphans,
+		&i.Tickets,
+	)
+	return i, err
+}
 
 const confirmOrder = `-- name: ConfirmOrder :execrows
 UPDATE orders SET status = 'CONFIRMED', confirmed_at = now(), updated_at = now()
@@ -106,6 +143,33 @@ func (q *Queries) GetOrderByHold(ctx context.Context, holdID uuid.UUID) (Order, 
 	return i, err
 }
 
+const getOrderByHoldSkipLocked = `-- name: GetOrderByHoldSkipLocked :one
+SELECT id, event_id, user_id, hold_id, seat_nos, amount_paise, currency, status, failure_code, created_at, updated_at, confirmed_at FROM orders WHERE hold_id = $1 FOR UPDATE SKIP LOCKED
+`
+
+// Reclaim hook (sweeper, PG takeover): lock the hold's order without
+// waiting. No row means there is no order, or ConfirmOrder holds it and
+// will itself see the reclaimed hold and fail the order (no deadlock).
+func (q *Queries) GetOrderByHoldSkipLocked(ctx context.Context, holdID uuid.UUID) (Order, error) {
+	row := q.db.QueryRow(ctx, getOrderByHoldSkipLocked, holdID)
+	var i Order
+	err := row.Scan(
+		&i.ID,
+		&i.EventID,
+		&i.UserID,
+		&i.HoldID,
+		&i.SeatNos,
+		&i.AmountPaise,
+		&i.Currency,
+		&i.Status,
+		&i.FailureCode,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.ConfirmedAt,
+	)
+	return i, err
+}
+
 const getOrderForUpdate = `-- name: GetOrderForUpdate :one
 SELECT id, event_id, user_id, hold_id, seat_nos, amount_paise, currency, status, failure_code, created_at, updated_at, confirmed_at FROM orders WHERE id = $1 FOR UPDATE
 `
@@ -170,6 +234,78 @@ func (q *Queries) InsertOrder(ctx context.Context, arg InsertOrderParams) (Order
 		&i.ConfirmedAt,
 	)
 	return i, err
+}
+
+const listAuthorizedConfirmedPayments = `-- name: ListAuthorizedConfirmedPayments :many
+SELECT p.id, p.order_id, p.attempt, p.provider, p.provider_intent_id, p.psp_idempotency_key, p.amount_paise, p.status, p.created_at, p.updated_at FROM payments p JOIN orders o ON o.id = p.order_id
+WHERE o.status = 'CONFIRMED' AND p.status = 'AUTHORIZED' AND p.updated_at < $1
+ORDER BY p.updated_at
+LIMIT $2
+`
+
+type ListAuthorizedConfirmedPaymentsParams struct {
+	Before    time.Time
+	BatchSize int32
+}
+
+// Reconciler: confirmed orders whose payment is still only AUTHORIZED.
+func (q *Queries) ListAuthorizedConfirmedPayments(ctx context.Context, arg ListAuthorizedConfirmedPaymentsParams) ([]Payment, error) {
+	rows, err := q.db.Query(ctx, listAuthorizedConfirmedPayments, arg.Before, arg.BatchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Payment{}
+	for rows.Next() {
+		var i Payment
+		if err := rows.Scan(
+			&i.ID,
+			&i.OrderID,
+			&i.Attempt,
+			&i.Provider,
+			&i.ProviderIntentID,
+			&i.PspIdempotencyKey,
+			&i.AmountPaise,
+			&i.Status,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPendingOrdersWithDeadHold = `-- name: ListPendingOrdersWithDeadHold :many
+SELECT o.id FROM orders o JOIN holds h ON h.id = o.hold_id
+WHERE o.status = 'PENDING_PAYMENT' AND h.status IN ('EXPIRED', 'RELEASED')
+ORDER BY o.created_at
+LIMIT $1
+`
+
+// Reconciler: PENDING_PAYMENT orders whose hold was released or reclaimed.
+func (q *Queries) ListPendingOrdersWithDeadHold(ctx context.Context, batchSize int32) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listPendingOrdersWithDeadHold, batchSize)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []uuid.UUID{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const refundOrder = `-- name: RefundOrder :execrows

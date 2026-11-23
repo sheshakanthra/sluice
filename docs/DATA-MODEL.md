@@ -174,28 +174,33 @@ CREATE TABLE naive_sales (
 ```
 
 ## 2. Postgres: `mockpay` database (owned by the MockPay service only)
+Source of truth: `internal/mockpay/migrations/0001_mockpay.sql`, applied by `sluice mockpay` at start-up (goose, embedded). Queries: `internal/mockpay/queries/mockpay.sql` → sqlc package `internal/mockpay/mpdb`.
 ```sql
 CREATE TABLE merchants (
-  id              text PRIMARY KEY,                 -- 'sluice' (seeded)
-  api_key_hash    bytea NOT NULL,
+  id              text PRIMARY KEY,                 -- 'sluice' (upserted from config at start-up)
+  api_key_hash    bytea NOT NULL,                   -- sha256(MOCKPAY_API_KEY)
   webhook_url     text NOT NULL,
   webhook_secret  text NOT NULL
 );
+
 CREATE TABLE intents (
   id               text PRIMARY KEY,                -- pi_<uuidv7 hex>
   merchant_id      text NOT NULL REFERENCES merchants(id),
   idempotency_key  text NOT NULL,
   request_hash     bytea NOT NULL,
-  merchant_ref     text NOT NULL,                   -- our order_id
+  merchant_ref     text NOT NULL,                   -- SLUICE's order_id
   metadata         jsonb NOT NULL DEFAULT '{}',     -- event_id, attempt, run_id
   amount_paise     bigint NOT NULL CHECK (amount_paise > 0),
   currency         char(3) NOT NULL,
-  status           text NOT NULL,                   -- requires_payment|authorized|captured|canceled|failed|refunded
+  status           text NOT NULL CHECK (status IN ('requires_payment','authorized','captured','canceled','failed','refunded')),
+  return_url       text NOT NULL DEFAULT '',        -- hosted checkout redirects here (ADR 0007)
   created_at       timestamptz NOT NULL DEFAULT now(),
   updated_at       timestamptz NOT NULL DEFAULT now(),
   UNIQUE (merchant_id, idempotency_key)
 );
 CREATE INDEX intents_ref_idx ON intents (merchant_id, merchant_ref);
+CREATE INDEX intents_status_idx ON intents (merchant_id, status, updated_at);
+
 CREATE TABLE ledger_entries (                       -- append-only money movements
   id               bigserial PRIMARY KEY,
   intent_id        text NOT NULL REFERENCES intents(id),
@@ -205,6 +210,18 @@ CREATE TABLE ledger_entries (                       -- append-only money movemen
   created_at       timestamptz NOT NULL DEFAULT now(),
   UNIQUE (intent_id, kind)                          -- full-amount ops only; no double capture per intent
 );
+
+-- Append-only, enforced by the database rather than by convention (ADR 0007):
+-- a money movement is corrected by a new entry (VOID, REFUND), never edited.
+CREATE FUNCTION ledger_entries_append_only() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  RAISE EXCEPTION 'ledger_entries is append-only (% rejected)', TG_OP USING ERRCODE = 'insufficient_privilege';
+END;
+$$;
+CREATE TRIGGER ledger_entries_no_update_delete
+  BEFORE UPDATE OR DELETE OR TRUNCATE ON ledger_entries
+  FOR EACH STATEMENT EXECUTE FUNCTION ledger_entries_append_only();
+
 CREATE TABLE idempotency (
   merchant_id    text NOT NULL,
   key            text NOT NULL,
@@ -214,6 +231,7 @@ CREATE TABLE idempotency (
   created_at     timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (merchant_id, key)
 );
+
 CREATE TABLE webhook_deliveries (
   id               bigserial PRIMARY KEY,
   event_id         text NOT NULL,                   -- evt_...; duplicates share an event_id
@@ -227,7 +245,7 @@ CREATE TABLE webhook_deliveries (
 );
 CREATE INDEX webhook_due_idx ON webhook_deliveries (next_attempt_at) WHERE delivered_at IS NULL;
 ```
-Duplicate-charge truth comes from the ledger: per `merchant_ref`, count intents that have a `CAPTURE` entry and no `REFUND` entry.
+Duplicate-charge truth comes from the ledger: per `merchant_ref`, count intents that have a `CAPTURE` entry and no `REFUND` entry. An intent's `authorized` flag in the API is derived from the ledger (it has an `AUTH` entry), so a canceled intent still says whether money was ever held. Voiding a `requires_payment` intent cancels it without a ledger entry.
 
 ## 3. State machines (pure Go in `internal/orders` and `internal/inventory`, with exhaustive tests)
 ```
@@ -238,10 +256,12 @@ hold:     ACTIVE ─order created→ PAYMENT_PENDING ─confirm→ CONSUMED
           ACTIVE|PAYMENT_PENDING ─reclaim (expired)→ EXPIRED
 order:    PENDING_PAYMENT ─confirm→ CONFIRMED
           PENDING_PAYMENT ─hold lost / quota / 3 failed attempts→ FAILED
-          PENDING_PAYMENT ─hold expired→ EXPIRED
+          PENDING_PAYMENT ─hold reclaimed, money was authorized (voided/refunded first)→ FAILED (HOLD_LOST)
+          PENDING_PAYMENT ─hold reclaimed, no money ever authorized→ EXPIRED
           CONFIRMED ─admin refund (not in v1 UI)→ REFUNDED
 payment:  CREATED ─authorized→ AUTHORIZED ─captured→ CAPTURED ─refund→ REFUNDED
           CREATED ─declined→ FAILED
+          CREATED ─void (intent canceled; it had been authorized at the PSP)→ VOIDED   (ADR 0007)
           AUTHORIZED ─void→ VOIDED
 ```
 Every other transition is rejected. Out-of-order events (for example `captured` arriving before `authorized`) apply only if they move forward; regressions are ignored and counted.

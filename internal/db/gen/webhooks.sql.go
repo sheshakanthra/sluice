@@ -9,6 +9,29 @@ import (
 	"context"
 )
 
+const getWebhookEvent = `-- name: GetWebhookEvent :one
+SELECT provider, event_id, type, payload, received_at, processed_at FROM webhook_events WHERE provider = $1 AND event_id = $2
+`
+
+type GetWebhookEventParams struct {
+	Provider string
+	EventID  string
+}
+
+func (q *Queries) GetWebhookEvent(ctx context.Context, arg GetWebhookEventParams) (WebhookEvent, error) {
+	row := q.db.QueryRow(ctx, getWebhookEvent, arg.Provider, arg.EventID)
+	var i WebhookEvent
+	err := row.Scan(
+		&i.Provider,
+		&i.EventID,
+		&i.Type,
+		&i.Payload,
+		&i.ReceivedAt,
+		&i.ProcessedAt,
+	)
+	return i, err
+}
+
 const insertWebhookEvent = `-- name: InsertWebhookEvent :execrows
 
 INSERT INTO webhook_events (provider, event_id, type, payload)

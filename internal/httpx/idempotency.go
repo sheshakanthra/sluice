@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/sheshakanthra/sluice/internal/db/gen"
 )
@@ -42,6 +43,8 @@ type Idempotency struct {
 	userID func(context.Context) uuid.UUID
 	log    *slog.Logger
 	now    func() time.Time
+	// replays counts idempotency_replays_total (optional).
+	replays prometheus.Counter
 }
 
 // NewIdempotency builds the middleware. userID returns the authenticated
@@ -51,6 +54,23 @@ func NewIdempotency(q *gen.Queries, userID func(context.Context) uuid.UUID, log 
 		now = time.Now
 	}
 	return &Idempotency{q: q, userID: userID, log: log, now: now}
+}
+
+// NewReplayCounter registers idempotency_replays_total on reg.
+func NewReplayCounter(reg prometheus.Registerer) (prometheus.Counter, error) {
+	c := prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "idempotency_replays_total", Help: "Requests answered from a stored Idempotency-Key response.",
+	})
+	if err := reg.Register(c); err != nil {
+		return nil, fmt.Errorf("idempotency metrics: %w", err)
+	}
+	return c, nil
+}
+
+// WithReplays counts replays on c.
+func (m *Idempotency) WithReplays(c prometheus.Counter) *Idempotency {
+	m.replays = c
+	return m
 }
 
 // ValidIdempotencyKey: 8-128 visible ASCII characters.
@@ -165,6 +185,9 @@ func (m *Idempotency) claim(ctx context.Context, uid uuid.UUID, key, method, rou
 		return false, nil
 	}
 	if row.Status == "COMPLETED" && row.ResponseCode != nil {
+		if m.replays != nil {
+			m.replays.Inc()
+		}
 		h := w.Header()
 		h.Set(ReplayedHeader, "true")
 		h.Set("Cache-Control", "no-store")

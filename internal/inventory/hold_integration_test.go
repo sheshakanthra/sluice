@@ -210,10 +210,18 @@ func TestIdempotentHold(t *testing.T) {
 			if a.ID != inventory.HoldID(uid, key) {
 				t.Error("hold id is not UUIDv5(user:key)")
 			}
-			// 50 concurrent calls with one fresh key.
+			// 50 concurrent calls with one fresh key, on two seats the first
+			// (random best-available) hold did not get: with fixed seats 10
+			// and 11 this test failed ~8% of runs in redis_pg mode (SPOP).
+			var free []int32
+			for sn := int32(0); len(free) < 2; sn++ {
+				if !slices.Contains(a.SeatNos, sn) {
+					free = append(free, sn)
+				}
+			}
 			uid2, key2 := uuid.New(), newKey()
 			res := race(50, func(int) outcome {
-				h, err := e.hold(uid2, key2, seatsReq(10, 11))
+				h, err := e.hold(uid2, key2, seatsReq(free...))
 				return outcome{h, err}
 			})
 			for _, r := range res {

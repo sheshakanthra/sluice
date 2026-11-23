@@ -105,7 +105,11 @@ func (s *Service) reclaimExpired(ctx context.Context) (SweepResult, error) {
 				if _, err := q.ReleaseSeats(ctx, gen.ReleaseSeatsParams{EventID: h.EventID, HoldID: h.ID}); err != nil {
 					return fmt.Errorf("free seats: %w", err)
 				}
-				// P3: expire the hold's order and enqueue void_payment here.
+				if s.reclaim != nil {
+					if err := s.reclaim(ctx, tx, h.ID); err != nil {
+						return fmt.Errorf("reclaim hook: %w", err)
+					}
+				}
 				reclaimed = append(reclaimed, h)
 			}
 			return nil

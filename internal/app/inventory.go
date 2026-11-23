@@ -17,7 +17,7 @@ import (
 // registered on reg. Scripts are preloaded when Redis is reachable; if it
 // is not, EVALSHA falls back to EVAL later.
 func newInventory(ctx context.Context, cfg *config.Config, log *slog.Logger, reg prometheus.Registerer,
-	pg *pgxpool.Pool, rdb *redis.Client,
+	pg *pgxpool.Pool, rdb *redis.Client, onReclaim inventory.ReclaimHook,
 ) (*inventory.Service, error) {
 	sc, err := redisx.NewScripts(rdb, reg)
 	if err != nil {
@@ -32,6 +32,6 @@ func newInventory(ctx context.Context, cfg *config.Config, log *slog.Logger, reg
 	}
 	return inventory.NewService(pg, rdb, sc, inventory.Options{
 		HoldTTL: cfg.HoldTTL, MaxSeats: cfg.MaxSeatsPerOrder, PGOnly: cfg.HoldPath == config.HoldPathPGOnly,
-		Log: log, Metrics: m,
+		Log: log, Metrics: m, OnReclaim: onReclaim,
 	})
 }

@@ -97,6 +97,7 @@ type Metrics struct {
 	expired       prometheus.Counter
 	compensations prometheus.Counter
 	seats         *prometheus.GaugeVec
+	repairs       prometheus.Counter
 }
 
 // Hold request results (holds_requests_total{result}).
@@ -127,8 +128,11 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 		seats: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "inventory_seats", Help: "Seats by state, from the availability cache.",
 		}, []string{"event", "state"}),
+		repairs: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "inventory_drift_repairs_total", Help: "Redis seats repaired from Postgres by the reconciler.",
+		}),
 	}
-	for _, c := range []prometheus.Collector{m.requests, m.expired, m.compensations, m.seats} {
+	for _, c := range []prometheus.Collector{m.requests, m.expired, m.compensations, m.seats, m.repairs} {
 		if err := reg.Register(c); err != nil {
 			return nil, fmt.Errorf("inventory metrics: %w", err)
 		}
@@ -157,7 +161,15 @@ type Options struct {
 	Now     func() time.Time
 	Log     *slog.Logger
 	Metrics *Metrics
+	// OnReclaim runs inside the transaction that reclaims an expired hold
+	// (sweeper or PG takeover), after the hold is EXPIRED and its seats are
+	// freed. The orders package uses it to expire the hold's order and void
+	// its payments (ARCHITECTURE §4.4). It must not wait on order locks.
+	OnReclaim ReclaimHook
 }
+
+// ReclaimHook is called with the reclaiming transaction and the hold id.
+type ReclaimHook func(ctx context.Context, tx pgx.Tx, holdID uuid.UUID) error
 
 // Service holds, releases, extends and consumes seats. Redis is the fast
 // path; Postgres has the final say (ARCHITECTURE §2, §4.2).
@@ -172,6 +184,7 @@ type Service struct {
 	now     func() time.Time
 	log     *slog.Logger
 	metrics *Metrics
+	reclaim ReclaimHook
 
 	events *eventCache
 }
@@ -196,7 +209,7 @@ func NewService(pg PG, rdb redis.Cmdable, sc *redisx.Scripts, o Options) (*Servi
 	q := gen.New(pg)
 	return &Service{
 		pg: pg, q: q, rdb: rdb, sc: sc, ttl: o.HoldTTL, max: o.MaxSeats, pgOnly: o.PGOnly,
-		now: o.Now, log: o.Log, metrics: o.Metrics, events: newEventCache(q, 5*time.Second, o.Now),
+		now: o.Now, log: o.Log, metrics: o.Metrics, reclaim: o.OnReclaim, events: newEventCache(q, 5*time.Second, o.Now),
 	}, nil
 }
 
