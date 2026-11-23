@@ -48,6 +48,7 @@ Send it as `Authorization: Bearer <token>`. Every token has `iss=sluice`, `iat`,
 | `PAYMENT_ATTEMPTS_EXHAUSTED` | 422 | More than 3 attempts |
 | `RATE_LIMITED` | 429 | With `Retry-After` |
 | `DEPENDENCY_UNAVAILABLE` | 503 | Redis/PG/PSP down; with `Retry-After` |
+| `INTERNAL` | 500 | Unexpected fault only (recovered panic, bug). Never a business outcome; see ADR 0003 |
 
 The client-observable outcomes of a rush (sold out, taken, rate-limited) are **never** 5xx (I8).
 

@@ -37,16 +37,23 @@ Everything here is free and open source and runs locally from Docker images. **N
 | Static hosting | **Vercel Hobby** (P8; replay mode) | — | Free, no card |
 | Live demo tunnel | **Cloudflare Quick Tunnel** (`cloudflared tunnel --url`) | latest | No account; HTTPS URL for interviews |
 
-### 1.1 Pinned versions (P0 fills this in with the exact versions installed)
+### 1.1 Pinned versions (filled in by P0 with the exact versions installed)
+Source commands: `go version`, `node -v`, `pnpm -v`, `task --version`, `golangci-lint --version`, `govulncheck -version`, `docker version`, `go.mod`, `web/package.json`, `deploy/compose.yml`.
+
 | Component | Exact version | Recorded in |
 |---|---|---|
-| Go | | `go.mod` (`go` + `toolchain`) |
-| Node / pnpm | | `web/package.json` (`engines`, `packageManager`) |
-| Next.js / React / Tailwind | | `web/package.json` |
-| Postgres image | | `deploy/compose.yml` (pin `postgres:18.x`) |
-| Redis image | | `deploy/compose.yml` (pin `redis:8.x`) |
-| Caddy / Prometheus / Grafana / Toxiproxy / k6 | | compose files |
-| River / pgx / go-redis / goose / sqlc / golangci-lint | | `go.mod`, Taskfile |
+| Go | `go 1.27.0` + `toolchain go1.27.4` (local: go1.27.4 windows/amd64) | `go.mod` |
+| Node / pnpm | Node v24.21.0 / pnpm 11.9.0 | `web/package.json` (`engines`, `packageManager`) |
+| Next.js / React / Tailwind | Next 16.4.6 / React 19.3.0 / Tailwind CSS 4.3.3 | `web/package.json` |
+| Postgres image | `postgres:18.7` | `deploy/compose.yml`, `internal/app/api_integration_test.go` |
+| Redis image | `redis:8.10.3` | `deploy/compose.yml`, `internal/app/api_integration_test.go` |
+| Prometheus / Grafana | `prom/prometheus:v3.16.0` / `grafana/grafana:13.3.1` | `deploy/compose.yml` |
+| Caddy / Toxiproxy / k6 | not added yet (Caddy P5, k6 P5, Toxiproxy P7); latest Caddy tag seen in P0: `caddy:2.11.9` | compose files (later phases) |
+| pgx / go-redis / client_golang / uuid | pgx v5.13.0 / go-redis v9.23.0 / client_golang v1.25.0 / uuid v1.6.0 | `go.mod` |
+| testcontainers-go | v0.45.0 (+ modules/postgres, modules/redis v0.45.0) | `go.mod` |
+| River / goose / sqlc | not added yet (P1/P3) | `go.mod`, Taskfile |
+| golangci-lint / govulncheck / Task | golangci-lint v2.15.0 / govulncheck v1.10.0 / Task 3.54.0 | `.github/workflows/ci.yml` (`env`) |
+| Docker (local) | Docker Desktop, engine 28.3.3 | (local only) |
 
 ## 2. Repo layout
 ```
@@ -83,8 +90,8 @@ sluice/
 │   ├── migrations/            # goose: 0001_init.sql, 0002_naive_baseline.sql, ...
 │   ├── queries/               # sqlc query files
 │   └── sqlc.yaml
-├── web/                       # Next.js static-export app
-├── design-system/             # UI UX Pro Max output: MASTER.md + pages/*.md
+├── web/                       # Next.js static-export app (scripts/screenshots.mjs = Quality-bar review)
+├── design-system/             # UI UX Pro Max output: MASTER.md (+ Direction notes) + pages/*.md; contrast.py
 ├── loadtest/
 │   ├── k6/                    # spike-queue.js, checkout.js
 │   └── results/               # raw runs (gitignored); curated copies go to docs/results/
@@ -112,7 +119,7 @@ sluice/
 | mockpay | 8090 | Browser reaches it as `/pay/*` via Caddy in the stack |
 | web dev server | 3000 | `task dev:web` |
 | Postgres | **5433** → 5432 | Not 5432, so it can't clash with a local install |
-| Redis | **6380** → 6379 | Not 6379, same reason |
+| Redis | **6381** → 6379 | Not 6379, same reason; not 6380 either, which another local project uses (ADR 0004) |
 | Prometheus | 9090 | |
 | Grafana | 3001 | Anonymous viewer locally |
 | Toxiproxy API | 8474 | Chaos only |
@@ -132,7 +139,7 @@ sluice/
 | `DATABASE_URL` | `postgres://sluice:sluice@localhost:5433/sluice?sslmode=disable` | | |
 | `MOCKPAY_DATABASE_URL` | `postgres://sluice:sluice@localhost:5433/mockpay?sslmode=disable` | | Separate DB, same server |
 | `DB_MAX_CONNS` | `24` | `24` | Per process |
-| `REDIS_URL` | `redis://localhost:6380/0` | | |
+| `REDIS_URL` | `redis://localhost:6381/0` | | |
 | `TOKEN_KEYS` | `dev1:<base64 32 bytes>` | | `kid:secret,...`; the first one signs, all of them verify |
 | `ADMIN_TOKEN` | `dev-admin-token-change-me` | | Bearer token for `/admin/*` |
 | `CORS_ORIGINS` | `http://localhost:3000` | | Comma-separated |

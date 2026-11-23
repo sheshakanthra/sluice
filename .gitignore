@@ -1,0 +1,51 @@
+# --- Secrets ---
+.env
+.env.*
+!.env.example
+deploy/env/*.env
+!deploy/env/rush.env
+
+# --- Go ---
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+coverage.*
+*.coverprofile
+/vendor/
+
+# --- Node / web ---
+node_modules/
+web/.next/
+web/out/
+.next/
+web/next-env.d.ts
+web/*.tsbuildinfo
+.pnpm-store/
+npm-debug.log*
+pnpm-debug.log*
+
+# --- Load test results (raw runs; curated copies go to docs/results/) ---
+loadtest/results/*
+!loadtest/results/.gitkeep
+
+# --- Playwright ---
+web/test-results/
+web/playwright-report/
+web/blob-report/
+
+# --- Tooling ---
+# UI UX Pro Max is a reinstallable tool; design-system/ is what gets committed.
+.claude/skills/ui-ux-pro-max/
+.claude/settings.local.json
+__pycache__/
+*.pyc
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp

@@ -1,0 +1,151 @@
+# SLUICE task runner. `task --list` shows everything.
+# Commands must work in Git Bash and in Task's built-in shell interpreter on
+# Windows: forward slashes, no bash-only features.
+version: "3"
+
+# Loaded if present (missing files are ignored). Copy .env.example to .env.
+dotenv: [".env"]
+
+vars:
+  MODULE: github.com/sheshakanthra/sluice
+  COMPOSE: docker compose -f deploy/compose.yml
+  VERSION:
+    sh: echo "${SLUICE_VERSION:-dev}"
+  COMMIT:
+    sh: git rev-parse --short HEAD 2>/dev/null || echo unknown
+  LDFLAGS: -s -w -X {{.MODULE}}/internal/buildinfo.Version={{.VERSION}} -X {{.MODULE}}/internal/buildinfo.Commit={{.COMMIT}}
+
+tasks:
+  default:
+    cmds:
+      - task --list
+    silent: true
+
+  # ---------- infra ----------
+  up:
+    desc: "Start infra (Postgres, Redis, Prometheus, Grafana) and wait until healthy"
+    cmds:
+      - "{{.COMPOSE}} up -d --wait"
+      - "{{.COMPOSE}} ps"
+
+  down:
+    desc: Stop infra (volumes are kept)
+    cmds:
+      - "{{.COMPOSE}} down"
+
+  ps:
+    desc: Show infra container status
+    cmds:
+      - "{{.COMPOSE}} ps"
+
+  # ---------- Go ----------
+  build:
+    desc: Build the sluice binary into bin/
+    cmds:
+      - go build -trimpath -ldflags "{{.LDFLAGS}}" -o bin/sluice{{exeExt}} ./cmd/sluice
+
+  version:
+    desc: Print the stamped version of a fresh build
+    cmds:
+      - go run -ldflags "{{.LDFLAGS}}" ./cmd/sluice version
+
+  dev:api:
+    desc: Run the API locally on HTTP_ADDR (default :8080)
+    cmds:
+      - go run -ldflags "{{.LDFLAGS}}" ./cmd/sluice api
+
+  gen:
+    desc: Code generation (sqlc arrives in P1)
+    cmds:
+      - echo "TODO(P1) - sqlc generate; nothing to generate in P0"
+
+  lint:
+    desc: golangci-lint v2 (linters + gofmt/goimports)
+    cmds:
+      - golangci-lint run ./...
+
+  test:
+    desc: All Go tests (integration tests need Docker running)
+    cmds:
+      - go test ./...
+
+  test:short:
+    desc: Unit tests only (skips testcontainers integration tests)
+    cmds:
+      - go test -short ./...
+
+  test:race:
+    desc: All Go tests under the race detector (needs cgo + gcc on Windows)
+    env:
+      CGO_ENABLED: "1"
+    cmds:
+      - go test -race ./...
+
+  vuln:
+    desc: govulncheck
+    cmds:
+      - govulncheck ./...
+
+  # ---------- web ----------
+  web:install:
+    desc: Install web dependencies (frozen lockfile)
+    cmds:
+      - pnpm --dir web install --frozen-lockfile
+
+  dev:web:
+    desc: Next.js dev server on :3000
+    cmds:
+      - pnpm --dir web dev
+
+  web:build:
+    desc: Static export into web/out
+    cmds:
+      - pnpm --dir web build
+
+  web:lint:
+    desc: ESLint + Prettier check + TypeScript typecheck
+    cmds:
+      - pnpm --dir web lint
+      - pnpm --dir web format:check
+      - pnpm --dir web typecheck
+
+  # ---------- later phases (stubs) ----------
+  migrate:
+    desc: "TODO(P1) apply migrations"
+    cmds: ["echo 'TODO(P1) - sluice migrate is not implemented yet' && exit 1"]
+  seed:
+    desc: "TODO(P1) seed demo events"
+    cmds: ["echo 'TODO(P1) - sluice seed is not implemented yet' && exit 1"]
+  dev:worker:
+    desc: "TODO(P2) run the worker locally"
+    cmds: ["echo 'TODO(P2) - sluice worker is not implemented yet' && exit 1"]
+  dev:mockpay:
+    desc: "TODO(P3) run MockPay locally"
+    cmds: ["echo 'TODO(P3) - sluice mockpay is not implemented yet' && exit 1"]
+  stack:up:
+    desc: "TODO(P5) full stack behind Caddy on :8000"
+    cmds: ["echo 'TODO(P5) - full stack is not implemented yet' && exit 1"]
+  stack:down:
+    desc: "TODO(P5) stop the full stack"
+    cmds: ["echo 'TODO(P5) - full stack is not implemented yet' && exit 1"]
+  rush:smoke:
+    desc: "TODO(P5) 5k-user smoke rush + audit"
+    cmds: ["echo 'TODO(P5) - rush is not implemented yet' && exit 1"]
+  rush:
+    desc: "TODO(P5) 50k-user headline rush + audit"
+    cmds: ["echo 'TODO(P5) - rush is not implemented yet' && exit 1"]
+  audit:
+    desc: "TODO(P5) invariant auditor"
+    cmds: ["echo 'TODO(P5) - audit is not implemented yet' && exit 1"]
+  e2e:
+    desc: "TODO(P6) Playwright e2e"
+    cmds: ["echo 'TODO(P6) - e2e is not implemented yet' && exit 1"]
+  chaos:
+    desc: "TODO(P7) chaos suite"
+    cmds: ["echo 'TODO(P7) - chaos is not implemented yet' && exit 1"]
+  demo:
+    desc: "TODO(P8) live demo stack"
+    cmds: ["echo 'TODO(P8) - demo is not implemented yet' && exit 1"]
+  tunnel:
+    desc: "TODO(P8) Cloudflare quick tunnel"
+    cmds: ["echo 'TODO(P8) - tunnel is not implemented yet' && exit 1"]

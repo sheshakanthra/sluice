@@ -7,7 +7,7 @@ Build an extraordinary-looking, calm, accessible booking flow plus Rush Control 
 ## Tasks
 1. **Page overrides:** run the five `--page` commands in DESIGN-BRIEF §2 and keep the outputs in `design-system/pages/`. Before building each page, read MASTER.md and that page's override.
 2. **Foundation (`web/`):**
-   - Tokens are already in `globals.css`. Load JetBrains Mono for data and the body font chosen by the skill.
+   - Tokens are already in `globals.css`, and the fonts chosen by the skill are loaded via `next/font` (see the Direction notes in `design-system/MASTER.md`).
    - shadcn components as needed (button, card, tabs, badge, dialog, tooltip, toast, progress, skeleton, separator).
    - `lib/api.ts`: a typed client, one function per endpoint in API.md. It handles problem+json, generates IKs (`crypto.randomUUID()` per user intent and **reuses** them on retry), and reads base URL `NEXT_PUBLIC_API_BASE_URL` in dev, same-origin otherwise.
    - `lib/mode.ts`: LIVE/REPLAY detection (DESIGN-BRIEF §3). `lib/replay.ts` loads the `results/latest/*` files and drives the timeline.
@@ -35,6 +35,7 @@ Build an extraordinary-looking, calm, accessible booking flow plus Rush Control 
 - [ ] E1–E5 pass, with E1's video saved to `web/e2e/artifacts/booking.webm`.
 - [ ] axe reports 0 serious or critical issues. Lighthouse meets DESIGN-BRIEF §7, or the miss is reported with its cause.
 - [ ] The UI UX Pro Max pre-delivery checklist is ticked per page (copy the checklist into the report).
+- [ ] Quality bar in DESIGN-BRIEF met; screenshot critique and fixes recorded in the report.
 - [ ] The JS budgets in DESIGN-BRIEF §7 are met (paste the `next build` output sizes).
 - [ ] `pnpm lint`, typecheck and `task lint test` are green.
 

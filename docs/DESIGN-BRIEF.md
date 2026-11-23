@@ -4,20 +4,19 @@ The goal is an **extraordinary-looking, calm-under-pressure** booking experience
 
 ## 1. Feel and brand
 - **Mood:** calm, certain, fast and honest. People arriving at 10:00:00 are anxious, so the UI lowers their heart rate. Nothing jumps, and nothing spins without information.
-- **Personal brand tokens** (Sheshakanth's identity, applied across his projects). These **override** the generated palette where they conflict:
-  - Background `#0B0F12` (dark-first)
-  - Accent `#00FFCC`, used sparingly: primary actions, your position, live indicators
-  - **JetBrains Mono** for numbers, codes, timers, ticket codes and data tables (`font-variant-numeric: tabular-nums`)
-- UI UX Pro Max chooses the body and heading typeface, the neutral ramp, the semantic colours (success / warning / danger / info), spacing, radius, elevation and motion. Its choices must reach WCAG AA contrast on `#0B0F12`.
-- Aesthetic direction: a "mission-control HUD". Thin 1 px grid lines, subtle glow **only** on live elements, depth from layered surfaces rather than drop shadows, generous whitespace. Avoid generic SaaS gradients, glassmorphism soup, and emoji as icons.
-- A light theme is optional (P8 stretch). Dark ships first.
+- **SLUICE has its own identity.** It is not a reskin of any portfolio or personal palette. **Never use the `#0B0F12` / `#00FFCC` / JetBrains Mono portfolio palette** anywhere in SLUICE.
+- **UI UX Pro Max owns the whole visual system:** palette, typefaces, type scale, neutral ramp, semantic colours (success / warning / danger / info), spacing, radius, elevation and motion. The chosen direction and its rationale live in the **Direction notes** section of `design-system/MASTER.md`.
+- **Avoid generic SaaS defaults:** neon-on-black, decorative gradients, glassmorphism, emoji as icons, and template hero sections (big centred headline + two buttons + feature grid with no point of view).
+- **All text meets WCAG AA** (≥ 4.5:1, or ≥ 3:1 for large text and UI component boundaries) on the surface it sits on.
+- Every UI task is held to the **Quality bar in §10**.
+- Light or dark is part of the direction the skill's output and the Direction notes decide. A second theme is a P8 stretch.
 
 ## 2. Generating the design system with UI UX Pro Max
 The P0 install puts the skill at `.claude/skills/ui-ux-pro-max/`. Use `python3`, or `python` on Windows if that's the working one.
 
 ```bash
 # P0: master design system (persisted to design-system/MASTER.md)
-python3 .claude/skills/ui-ux-pro-max/scripts/search.py "real-time ticket booking waiting room seat map mission control dashboard dark fintech-grade trust" --design-system --persist -p "SLUICE"
+python3 .claude/skills/ui-ux-pro-max/scripts/search.py "ticket booking waiting room seat map high-demand rush" --design-system --persist -p "SLUICE"
 
 # P6: page overrides (persisted to design-system/pages/<page>.md)
 python3 .claude/skills/ui-ux-pro-max/scripts/search.py "virtual waiting room queue position countdown progress" --design-system --persist -p "SLUICE" --page "queue"
@@ -31,7 +30,9 @@ python3 .claude/skills/ui-ux-pro-max/scripts/search.py "static export data fetch
 python3 .claude/skills/ui-ux-pro-max/scripts/search.py "charts realtime" --domain chart
 python3 .claude/skills/ui-ux-pro-max/scripts/search.py "accessibility forms timers" --domain ux
 ```
-After generating `MASTER.md`, append a **"Brand overrides"** section that lists the three tokens above and where they apply. Then map the tokens into Tailwind v4 `@theme` variables and shadcn CSS variables (one source of truth in `web/app/globals.css`).
+The skill persists to `design-system/sluice/` (it always nests output under the project slug). After every `--persist` run, move the files up to `design-system/MASTER.md` and `design-system/pages/<page>.md` and delete the empty `design-system/sluice/` folder (ADR 0002).
+
+After generating `MASTER.md`, choose **one bold, specific direction** from the skill's output and append a **"Direction notes"** section: the chosen style, palette and type, the **signature element** that carries through every screen, what was deliberately rejected from the raw output and why, and the WCAG contrast of every text colour (from `python design-system/contrast.py`). Then map the tokens into Tailwind v4 `@theme` variables and shadcn CSS variables (one source of truth in `web/app/globals.css`).
 
 ## 3. Screens and states
 | Route (static export: IDs go in query params) | Purpose | Must show | States |
@@ -94,6 +95,14 @@ Seat states must **not rely on colour alone**:
 - Sold out: "Sold out. Every seat found an owner, and nobody got the same seat twice."
 
 ## 9. Done means
+- The Quality bar in §10 is met, with the screenshot critique and fixes recorded in the phase report.
 - Every route in §3 is implemented in LIVE and REPLAY modes, following `design-system/MASTER.md` plus the page overrides.
 - The UI UX Pro Max pre-delivery checklist passes for each page (record it in the P6 report).
 - axe shows 0 serious or critical issues, the Lighthouse targets in §7 are met, and the e2e flows pass with the video recorded.
+
+## 10. Quality bar (binding for every UI task: P0 and P6)
+1. **Design like a senior product designer at a top consumer app.** The skill's output is the foundation, not the ceiling: push past its defaults to something memorable and specific to a Tatkal-style rush.
+2. **One clear concept that carries through every screen:** a signature element, a consistent type scale and spacing rhythm, and a deliberate colour hierarchy (one accent, used with intent).
+3. **Craft details:** hover, focus and pressed states; skeleton loading; empty and error states that are designed rather than default; meaningful motion (position ticking, seats flipping, timer urgency) that respects `prefers-reduced-motion`; crisp alignment on an **8 px grid**; real-looking content, never lorem ipsum.
+4. **Mobile-first:** flawless at 375 px, then excellent at desktop widths.
+5. **Screenshot review before calling any UI done:** capture each page with Playwright at **375 px and 1440 px**, critique it like a design review (hierarchy, spacing, contrast, consistency, "does this look like a template?"), fix what you find, and list the critique and the fixes in the phase report.

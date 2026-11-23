@@ -1,0 +1,226 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+
+/*
+ * SLUICE tokens. Single source of truth for colour, type and radius.
+ * Direction: "Swiss transit signage, light" (design-system/MASTER.md, Direction notes).
+ * Every text colour's contrast is measured by `python design-system/contrast.py`.
+ */
+:root {
+  /* Surfaces */
+  --paper: #eff6ff;
+  --card-surface: #ffffff;
+  --sunk: #dbeafe;
+
+  /* Ink */
+  --ink: #0f1f47;
+  --ink-muted: #3b4a6b;
+  --ink-subtle: #55647f;
+
+  /* Signage */
+  --navy: #1e3a8a;
+  --navy-soft: #bfdbfe; /* secondary text on navy: 7.29:1 */
+  --accent-strong: #c2410c; /* primary button fill; accent text on paper/card */
+  --accent-strong-hover: #9a3412; /* primary button hover/pressed */
+  --signal: #f97316; /* never text on light surfaces: fills under ink, dots, notches */
+
+  /* Lines */
+  --rule: #c7d5ec;
+  --rule-strong: #7d8daa; /* input/seat outlines, >= 3:1 on paper and card */
+
+  /* Semantic */
+  --success: #15803d;
+  --warning: #b45309;
+  --danger: #b91c1c;
+  --info: #1d4ed8;
+
+  /* shadcn slots mapped onto the palette */
+  --background: var(--paper);
+  --foreground: var(--ink);
+  --card: var(--card-surface);
+  --card-foreground: var(--ink);
+  --popover: var(--card-surface);
+  --popover-foreground: var(--ink);
+  --primary: var(--accent-strong);
+  --primary-foreground: #ffffff;
+  --secondary: var(--sunk);
+  --secondary-foreground: var(--navy);
+  --muted: var(--sunk);
+  --muted-foreground: var(--ink-muted);
+  --accent: var(--sunk);
+  --accent-foreground: var(--navy);
+  --destructive: var(--danger);
+  --border: var(--rule);
+  --input: var(--rule-strong);
+  --ring: var(--navy);
+  --chart-1: var(--navy);
+  --chart-2: var(--signal);
+  --chart-3: var(--info);
+  --chart-4: var(--success);
+  --chart-5: var(--ink-subtle);
+  --radius: 0.75rem; /* 12px stubs; controls use radius-sm (~4px) */
+  --sidebar: var(--card-surface);
+  --sidebar-foreground: var(--ink);
+  --sidebar-primary: var(--navy);
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: var(--sunk);
+  --sidebar-accent-foreground: var(--navy);
+  --sidebar-border: var(--rule);
+  --sidebar-ring: var(--navy);
+}
+
+@theme inline {
+  --font-sans: var(--font-barlow);
+  --font-heading: var(--font-barlow-condensed);
+  --font-display: var(--font-barlow-condensed);
+
+  --color-paper: var(--paper);
+  --color-sunk: var(--sunk);
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-ink-subtle: var(--ink-subtle);
+  --color-navy: var(--navy);
+  --color-navy-soft: var(--navy-soft);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-strong-hover: var(--accent-strong-hover);
+  --color-signal: var(--signal);
+  --color-rule: var(--rule);
+  --color-rule-strong: var(--rule-strong);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --color-info: var(--info);
+
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  --radius-sm: calc(var(--radius) * 0.34);
+  --radius-md: calc(var(--radius) * 0.67);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.34);
+  --radius-2xl: calc(var(--radius) * 1.67);
+  --radius-3xl: calc(var(--radius) * 2);
+  --radius-4xl: calc(var(--radius) * 2.67);
+
+  --animate-signal: signal-breathe 2.4s ease-in-out infinite;
+}
+
+@keyframes signal-breathe {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in oklab, var(--signal) 55%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 0 6px color-mix(in oklab, var(--signal) 0%, transparent);
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    @apply font-sans;
+    -webkit-text-size-adjust: 100%;
+  }
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: "kern", "liga";
+  }
+  ::selection {
+    background: var(--navy);
+    color: #ffffff;
+  }
+}
+
+@layer components {
+  /* Platform-sign label: small, uppercase, widely tracked. */
+  .sign-label {
+    font-size: 0.75rem;
+    line-height: 1rem;
+    font-weight: 600;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+  }
+
+  /* Numerals that must not jitter while they change. */
+  .tabular {
+    font-variant-numeric: tabular-nums lining-nums;
+    font-feature-settings: "tnum", "lnum";
+  }
+
+  /*
+   * Signature element: the ticket stub's perforated tear line.
+   * A dashed rule with two semicircle "punches" cut into the card edges.
+   * The punches take the page colour so the card reads as torn paper.
+   */
+  .perforation {
+    position: relative;
+    height: 0;
+    border-top: 2px dashed var(--rule);
+    margin-inline: 1.5rem;
+  }
+  .perforation::before,
+  .perforation::after {
+    content: "";
+    position: absolute;
+    top: -13px;
+    width: 24px;
+    height: 24px;
+    border-radius: 9999px;
+    border: 1px solid var(--rule);
+    background: var(--punch, var(--paper));
+  }
+  .perforation::before {
+    left: calc(-1.5rem - 12px);
+  }
+  .perforation::after {
+    right: calc(-1.5rem - 12px);
+  }
+  /* Internal divider between stub columns: no punches (holes only make sense at the card edge). */
+  .perforation-vertical {
+    width: 0;
+    border-left: 2px dashed var(--rule);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

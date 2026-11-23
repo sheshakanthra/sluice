@@ -9,7 +9,7 @@ Set up a repo that builds, lints, tests and runs infra with one command each. Th
    - `npm install -g uipro-cli`, then `uipro init --ai claude`. Fallback: `npx -y uipro-cli init --ai claude`.
    - Verify: the file exists and `python3` (or `python`) `--version` works.
    - Add `.claude/skills/ui-ux-pro-max/` to `.gitignore`. It's a reinstallable tool; the generated `design-system/` is what gets committed.
-   - Generate the master design system with the exact P0 command in DESIGN-BRIEF §2, then append the **Brand overrides** section to `design-system/MASTER.md`.
+   - Generate the master design system with the exact P0 command in DESIGN-BRIEF §2, choose one bold, specific direction from its output and append the **Direction notes** section to `design-system/MASTER.md` (DESIGN-BRIEF §2).
 2. **Repo hygiene:**
    - `.gitignore` (Go, Node, `.env`, `loadtest/results/*` except `.gitkeep`, `web/out`, `.next`, coverage, the skill folder)
    - `.gitattributes`: already in the kit (`* text=auto eol=lf` plus binary rules). Extend it if needed.
@@ -28,15 +28,15 @@ Set up a repo that builds, lints, tests and runs infra with one command each. Th
    - `postgres:18` (pin the exact minor). The volume mounts at **`/var/lib/postgresql`**; 18+ changed the path, and the old `/data` mount fails. Healthcheck `pg_isready`. Init script `deploy/postgres/init/01-mockpay-db.sql` creates the `mockpay` DB.
    - `redis:8` (pinned) with `--appendonly yes --appendfsync everysec --maxmemory-policy noeviction`, plus a healthcheck.
    - `prom/prometheus` and `grafana/grafana` (anonymous viewer, provisioned Prometheus datasource).
-   - Host ports per STACK.md §3 (5433, 6380, 9090, 3001).
+   - Host ports per STACK.md §3 (5433, 6381, 9090, 3001; Redis moved from 6380 by ADR 0004).
 5. **Taskfile.yml**: `up`, `down`, `dev:api`, `lint`, `test`, `test:race`, `gen` (stub), `dev:web`, `web:build`, `web:lint`. Mark the later ones (`stack:*`, `rush*`, `audit`, `chaos`, `demo`, `tunnel`, `e2e`) as `TODO(Pn)` stubs. Everything must work in Git Bash on Windows.
 6. **Lint config:** `.golangci.yml` in v2 format (errcheck, govet, staticcheck, gosec, errorlint, bodyclose, noctx, contextcheck, sqlclosecheck, rowserrcheck, gocritic, revive with sane defaults).
 7. **Web:** `web/` via create-next-app:
    - TypeScript, App Router, Tailwind v4, ESLint, pnpm
    - `output: 'export'`, `images.unoptimized: true`, `trailingSlash: true`
    - `shadcn` init
-   - tokens from MASTER.md plus brand overrides mapped into `globals.css` (`@theme`), with JetBrains Mono and the body font loaded via `next/font`
-   - one placeholder landing page that already uses the tokens: dark `#0B0F12`, an accent CTA, and tabular numerals in a "50,000 · 0 · 0" strip
+   - tokens from MASTER.md and its Direction notes mapped into `globals.css` (`@theme`), with the fonts the skill chose loaded via `next/font`
+   - one placeholder landing page that already shows the chosen direction at full polish (DESIGN-BRIEF §10 Quality bar): the signature element, one accent CTA, and tabular numerals in a "50,000 · 0 · 0" strip
 8. **CI** `.github/workflows/ci.yml` on push and PR:
    - Go job: setup-go, Task, `golangci-lint`, `go test -race ./...`, `govulncheck`
    - Web job: pnpm install, lint, typecheck, build
@@ -47,7 +47,7 @@ Set up a repo that builds, lints, tests and runs infra with one command each. Th
 - [ ] `task dev:api`, then `curl -s localhost:8080/healthz` → 200, and `/readyz` → 200 while infra is up and 503 after `task down`.
 - [ ] `task lint test` is green, and `task test:race` is green (or the report says "race verified in CI only" because there's no gcc).
 - [ ] `task web:build` produces `web/out/index.html`.
-- [ ] `design-system/MASTER.md` exists and includes Brand overrides.
+- [ ] `design-system/MASTER.md` exists and includes Direction notes.
 - [ ] `go run ./cmd/sluice version` prints the version and commit (via `-ldflags`, or `unknown` in dev).
 - [ ] `.env.example` covers every env var the config reads (a unit test asserts this by parsing the file).
 - [ ] No mutating git command was run during the session.

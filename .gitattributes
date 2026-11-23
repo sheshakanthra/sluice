@@ -10,3 +10,9 @@
 *.woff binary
 *.woff2 binary
 *.zip binary
+*.ttf binary
+*.otf binary
+*.pdf binary
+go.sum linguist-generated=true
+pnpm-lock.yaml linguist-generated=true -diff
+internal/db/gen/** linguist-generated=true

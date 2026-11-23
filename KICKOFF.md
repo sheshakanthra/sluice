@@ -35,7 +35,7 @@ Verify .claude/skills/ui-ux-pro-max/scripts/search.py exists and that python3 or
   python3 .claude/skills/ui-ux-pro-max/scripts/search.py "ticket booking" --design-system -p "SLUICE"
 Use whichever python command works on this machine from now on.
 
-Step 2 - Execute docs/phases/P0-bootstrap.md exactly. Generate design-system/MASTER.md with the P0 command in docs/DESIGN-BRIEF.md and add the Brand overrides section.
+Step 2 - Execute docs/phases/P0-bootstrap.md exactly. Generate design-system/MASTER.md with the P0 command in docs/DESIGN-BRIEF.md and add the Direction notes section.
 
 Rules: git is mine - never run mutating git commands (they are also blocked in .claude/settings.json). Zero paid services, zero sign-ups. When every acceptance check passes, follow the Phase-End Protocol in CLAUDE.md: write docs/reports/P0-bootstrap.md, print the summary, the checklist and the git command block, then STOP.
 ```
