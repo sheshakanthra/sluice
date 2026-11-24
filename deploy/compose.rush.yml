@@ -13,8 +13,15 @@ services:
     command: ["--target", "http://caddy:8000", "--scenario", "SMOKE"]
     env_file:
       - env/${SLUICE_ENV:-rush}.env
+      - path: env/${SLUICE_ENV:-rush}.${SLUICE_SCENARIO:-none}.env
+        required: false
     environment:
       RUSH_RESULTS_DIR: /results
+      # `sluice rush --audit` / `sluice audit` read the datastores directly
+      # (in-network hosts, as in compose.app.yml).
+      DATABASE_URL: postgres://sluice:sluice@postgres:5432/sluice?sslmode=disable
+      MOCKPAY_DATABASE_URL: postgres://sluice:sluice@postgres:5432/mockpay?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
       RUSH_RUNNER: ${RUSH_RUNNER:-local}
       # Reported in summary.json; keep in step with deploy/compose.yml.
       RUSH_PG_VERSION: "18.7"
@@ -27,6 +34,29 @@ services:
       nofile:
         soft: 200000
         hard: 200000
+    volumes:
+      - ../loadtest/results:/results
+    depends_on:
+      caddy:
+        condition: service_healthy
+    restart: "no"
+
+  # The auditor (LOADTEST §6) on the same network: settles the stack, then
+  # checks every invariant. Run it with
+  #   ... run --rm -T audit --event <slug> --results /results/<run_id> [--mode naive]
+  audit:
+    image: sluice:local
+    profiles: ["rush"]
+    entrypoint: ["/usr/local/bin/sluice", "audit"]
+    env_file:
+      - env/${SLUICE_ENV:-rush}.env
+      - path: env/${SLUICE_ENV:-rush}.${SLUICE_SCENARIO:-none}.env
+        required: false
+    environment:
+      DATABASE_URL: postgres://sluice:sluice@postgres:5432/sluice?sslmode=disable
+      MOCKPAY_DATABASE_URL: postgres://sluice:sluice@postgres:5432/mockpay?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      AUDIT_API: http://caddy:8000
     volumes:
       - ../loadtest/results:/results
     depends_on:

@@ -50,6 +50,8 @@ type user struct {
 	queue   string // queue token
 	adm     string // admission token
 	joined  bool
+	rejoins int  // queue rejoins used (OFFER_EXPIRED or ADMISSION_EXPIRED), ≤ maxRejoins
+	lapsed  bool // the last shop ended on 403 ADMISSION_EXPIRED: rejoin, don't end
 }
 
 func newIK() string { return uuid.NewString() }
@@ -70,9 +72,21 @@ func (u *user) run(ctx context.Context) Outcome {
 		}
 		return u.end(ctx, u.shop(ctx, u.session)) // end: leave is a no-op without a queue
 	}
-	out, admitted := u.queueUp(ctx)
-	if admitted {
-		out = u.shop(ctx, u.adm)
+	out, admitted := u.queueUp(ctx, false)
+	for admitted {
+		u.lapsed = false
+		if out = u.shop(ctx, u.adm); !u.lapsed {
+			break
+		}
+		// 403 ADMISSION_EXPIRED: the server ended the admission lease; the
+		// client rejoins (API.md §1.3), within the same two-rejoin budget.
+		if u.rejoins >= maxRejoins {
+			out = OutNoSeat
+			break
+		}
+		u.rejoins++
+		u.adm = ""
+		out, admitted = u.queueUp(ctx, true)
 	}
 	return u.end(ctx, out)
 }
@@ -172,10 +186,11 @@ func (u *user) markJoined() {
 
 // queueView is the subset of the join/status body the swarm uses.
 type queueView struct {
-	State          string `json:"state"`
-	QueueToken     string `json:"queue_token"`
-	AdmissionToken string `json:"admission_token"`
-	RetryAfterMS   int64  `json:"retry_after_ms"`
+	State          string    `json:"state"`
+	QueueToken     string    `json:"queue_token"`
+	AdmissionToken string    `json:"admission_token"`
+	RetryAfterMS   int64     `json:"retry_after_ms"`
+	sent           time.Time // when the request that returned this view was sent
 }
 
 func (u *user) join(ctx context.Context, rejoin bool) (queueView, bool) {
@@ -183,8 +198,9 @@ func (u *user) join(ctx context.Context, rejoin bool) (queueView, bool) {
 	if rejoin {
 		path += "?rejoin=true"
 	}
-	r, ok := u.send(ctx, req{rt: rJoin, method: http.MethodPost, path: path, token: u.session, timeout: callTimeout, intended: time.Now()})
-	var v queueView
+	sent := time.Now()
+	r, ok := u.send(ctx, req{rt: rJoin, method: http.MethodPost, path: path, token: u.session, timeout: callTimeout, intended: sent})
+	v := queueView{sent: sent}
 	if !ok || r.status != http.StatusOK || json.Unmarshal(r.body, &v) != nil {
 		u.s.anomaly("join", &r)
 		return v, false
@@ -196,13 +212,12 @@ func (u *user) join(ctx context.Context, rejoin bool) (queueView, bool) {
 	return v, true
 }
 
-// queueUp joins and polls until admitted or a terminal answer.
-func (u *user) queueUp(ctx context.Context) (Outcome, bool) {
-	v, ok := u.join(ctx, false)
+// queueUp joins (or rejoins) and polls until admitted or a terminal answer.
+func (u *user) queueUp(ctx context.Context, rejoin bool) (Outcome, bool) {
+	v, ok := u.join(ctx, rejoin)
 	if !ok {
 		return u.unresolvedOr(ctx, OutUnresolved), false
 	}
-	rejoins := 0
 	u.s.waiting.Add(1)
 	defer u.s.waiting.Add(-1)
 	next := time.Now()
@@ -210,16 +225,17 @@ func (u *user) queueUp(ctx context.Context) (Outcome, bool) {
 		switch v.State {
 		case "ADMITTED":
 			if v.AdmissionToken != "" {
+				u.s.recordAdmit(v.sent)
 				u.adm = v.AdmissionToken
 				return 0, true
 			}
 		case "SOLD_OUT", "CLOSED":
 			return OutSoldOut, false
 		case "OFFER_EXPIRED":
-			if rejoins >= maxRejoins {
+			if u.rejoins >= maxRejoins {
 				return OutNoSeat, false
 			}
-			rejoins++
+			u.rejoins++
 			if v, ok = u.join(ctx, true); !ok {
 				return u.unresolvedOr(ctx, OutNoSeat), false
 			}
@@ -247,8 +263,9 @@ func (u *user) queueUp(ctx context.Context) (Outcome, bool) {
 
 // status polls once (2 s timeout, retried immediately on timeout).
 func (u *user) status(ctx context.Context, intended time.Time) (queueView, bool) {
+	sent := time.Now()
 	r, ok := u.send(ctx, req{rt: rStatus, method: http.MethodGet, path: u.s.eventPath + "/queue/status", token: u.queue, timeout: statusTimeout, intended: intended})
-	var v queueView
+	v := queueView{sent: sent}
 	if !ok || r.status != http.StatusOK || json.Unmarshal(r.body, &v) != nil {
 		u.s.anomaly("status", &r)
 		return v, false
@@ -278,6 +295,14 @@ func (u *user) leave(ctx context.Context) {
 	}
 }
 
+// release gives a hold back (DELETE /holds/{id}). Best effort.
+func (u *user) release(ctx context.Context, tok, holdID string) {
+	r, _ := u.send(ctx, req{rt: rRelease, method: http.MethodDelete, path: "/holds/" + holdID, token: tok, timeout: callTimeout, intended: time.Now()})
+	if r.status >= 400 && r.status != http.StatusNotFound && r.code() != "HOLD_EXPIRED" {
+		u.s.anomaly("release", &r)
+	}
+}
+
 // shop: think → hold (with retries) → think → order → pay.
 func (u *user) shop(ctx context.Context, tok string) Outcome {
 	u.s.shopping.Add(1)
@@ -303,6 +328,12 @@ func (u *user) shop(ctx context.Context, tok string) Outcome {
 		return OutUnresolved
 	}
 	var ov orderView
+	if r.code() == "ADMISSION_EXPIRED" {
+		// Give the seats back now rather than at the hold TTL, then rejoin.
+		u.release(ctx, tok, holdID)
+		u.lapsed = true
+		return OutNoSeat
+	}
 	if (r.status != http.StatusCreated && r.status != http.StatusOK) || json.Unmarshal(r.body, &ov) != nil {
 		u.s.anomaly("order", &r)
 		return OutNoSeat
@@ -341,6 +372,9 @@ func (u *user) hold(ctx context.Context, tok string, intended time.Time) (string
 		switch p.Code {
 		case "SOLD_OUT":
 			return "", OutSoldOut, false
+		case "ADMISSION_EXPIRED":
+			u.lapsed = true
+			return "", OutNoSeat, false
 		case "SEATS_TAKEN":
 			pick = false // next: best-available, same quantity
 		case "INSUFFICIENT_SEATS":

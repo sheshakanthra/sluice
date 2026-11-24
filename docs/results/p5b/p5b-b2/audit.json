@@ -1,0 +1,115 @@
+{
+  "event": "rush-1124-190709",
+  "event_id": "01a20dc6-ee4b-7f37-a1c8-3c33eab6ce3d",
+  "mode": "normal",
+  "started_at": "2026-11-24T13:38:39.227440455Z",
+  "finished_at": "2026-11-24T13:39:11.905123252Z",
+  "settle": {
+    "seconds": 32.64171922,
+    "timed_out": false,
+    "polls": 34,
+    "reconcile": [
+      {
+        "orphans_fixed": 0,
+        "duplicates_fixed": 0,
+        "converged": 0,
+        "captures_requeued": 0,
+        "dead_holds_settled": 0,
+        "inventory_repaired": 0
+      },
+      {
+        "orphans_fixed": 0,
+        "duplicates_fixed": 0,
+        "converged": 0,
+        "captures_requeued": 0,
+        "dead_holds_settled": 0,
+        "inventory_repaired": 0
+      },
+      {
+        "orphans_fixed": 0,
+        "duplicates_fixed": 0,
+        "converged": 0,
+        "captures_requeued": 0,
+        "dead_holds_settled": 0,
+        "inventory_repaired": 0
+      }
+    ],
+    "pending_at_end": {
+      "jobs": 0,
+      "expired_holds": 0,
+      "webhooks": 0,
+      "young_intents": 0
+    }
+  },
+  "checks": [
+    {
+      "name": "oversold",
+      "count": 0,
+      "pass": true,
+      "detail": {
+        "capacity": 500,
+        "excess_over_capacity": 0,
+        "issued": 451,
+        "seats_sold_more_than_once": 0,
+        "source": "tickets"
+      }
+    },
+    {
+      "name": "duplicate_charges",
+      "count": 0,
+      "pass": true,
+      "detail": {
+        "definition": "merchant_refs (orders) with more than 1 captured intent net of refunds",
+        "extra_charges": 0,
+        "refs_in_ledger": 342
+      }
+    },
+    {
+      "name": "orphan_charges",
+      "count": 0,
+      "pass": true,
+      "detail": {
+        "definition": "captured-not-refunded intents whose order is not CONFIRMED"
+      }
+    },
+    {
+      "name": "quota_violations",
+      "count": 0,
+      "pass": true,
+      "detail": {
+        "max_per_user": 4
+      }
+    },
+    {
+      "name": "stuck_holds",
+      "count": 0,
+      "pass": true,
+      "detail": {
+        "grace_s": 2
+      }
+    },
+    {
+      "name": "inventory_drift",
+      "count": 0,
+      "pass": true
+    },
+    {
+      "name": "ticket_order_consistency",
+      "count": 0,
+      "pass": true
+    },
+    {
+      "name": "admitted_after_soldout",
+      "count": null,
+      "pass": true,
+      "note": "direct mode: no waiting room, no admissions"
+    },
+    {
+      "name": "unresolved_users",
+      "count": 0,
+      "pass": true
+    }
+  ],
+  "passed": true,
+  "exit_code": 0
+}

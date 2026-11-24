@@ -21,6 +21,7 @@ const (
 	CodeTokenInvalid             Code = "TOKEN_INVALID"
 	CodeTokenExpired             Code = "TOKEN_EXPIRED"
 	CodeNotAdmitted              Code = "NOT_ADMITTED"
+	CodeAdmissionExpired         Code = "ADMISSION_EXPIRED"
 	CodeNotFound                 Code = "NOT_FOUND"
 	CodeSeatsTaken               Code = "SEATS_TAKEN"
 	CodeInsufficientSeats        Code = "INSUFFICIENT_SEATS"
@@ -52,6 +53,7 @@ var catalogue = map[Code]codeInfo{
 	CodeTokenInvalid:             {http.StatusUnauthorized, "The token is invalid"},
 	CodeTokenExpired:             {http.StatusUnauthorized, "The token has expired"},
 	CodeNotAdmitted:              {http.StatusForbidden, "You have not been admitted from the queue yet"},
+	CodeAdmissionExpired:         {http.StatusForbidden, "Your admission has ended; rejoin the queue"},
 	CodeNotFound:                 {http.StatusNotFound, "Not found"},
 	CodeSeatsTaken:               {http.StatusConflict, "Some seats were just taken"},
 	CodeInsufficientSeats:        {http.StatusConflict, "Not enough seats left"},

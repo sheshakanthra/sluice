@@ -1,0 +1,65 @@
+{
+  "test": "K2 checkout",
+  "step_s": 60,
+  "steps": [
+    {
+      "rate_per_s": 50,
+      "iterations": 3000,
+      "checkouts_ok": 3000,
+      "dropped_iterations": 0,
+      "checkout_ms": {
+        "p50": 94.184889,
+        "p95": 200.28460414999995,
+        "p99": 2086.4989191300006,
+        "max": 2456.937945
+      },
+      "error_rate": 0,
+      "sustainable": true
+    },
+    {
+      "rate_per_s": 100,
+      "iterations": 5990,
+      "checkouts_ok": 5990,
+      "dropped_iterations": 10,
+      "checkout_ms": {
+        "p50": 212.9227565,
+        "p95": 709.3607910499998,
+        "p99": 2206.319465240006,
+        "max": 4215.906389
+      },
+      "error_rate": 0,
+      "sustainable": false
+    },
+    {
+      "rate_per_s": 200,
+      "iterations": 6774,
+      "checkouts_ok": 6774,
+      "dropped_iterations": 5227,
+      "checkout_ms": {
+        "p50": 3058.5591655,
+        "p95": 5795.8942911,
+        "p99": 7086.077973950005,
+        "max": 9794.836795
+      },
+      "error_rate": 0,
+      "sustainable": false
+    },
+    {
+      "rate_per_s": 300,
+      "iterations": 6464,
+      "checkouts_ok": 5935,
+      "dropped_iterations": 11536,
+      "checkout_ms": {
+        "p50": 2810.595863,
+        "p95": 7938.218952800001,
+        "p99": 10668.991392140004,
+        "max": 12028.576373
+      },
+      "error_rate": 0.08183787128712872,
+      "sustainable": false
+    }
+  ],
+  "max_sustainable_checkouts_per_s": 50,
+  "criteria": "checkout p95 <= 250 ms, errors <= 0.1%, no dropped iterations",
+  "note": "k6 times each request from when it is sent (no intended-start correction)"
+}

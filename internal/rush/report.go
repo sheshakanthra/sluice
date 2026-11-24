@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sheshakanthra/sluice/internal/audit"
 	"github.com/sheshakanthra/sluice/internal/buildinfo"
 )
 
@@ -38,7 +39,9 @@ type Summary struct {
 	// LOADTEST schema, kept so nothing odd hides inside an outcome count.
 	Anomalies map[string]int64 `json:"anomalies"`
 	Generator SummaryGenerator `json:"generator"`
-	// Audit is filled by `sluice audit` (P5b); null until then.
+	// Records are swarm-side facts the auditor checks (LOADTEST §6).
+	Records *SummaryRecords `json:"records"`
+	// Audit is filled by `sluice audit` / `sluice rush --audit`; null until then.
 	Audit    *SummaryAudit   `json:"audit"`
 	Headline SummaryHeadline `json:"headline"`
 }
@@ -125,15 +128,35 @@ type SummaryGenerator struct {
 	StatsFailed    int     `json:"stats_failed"`
 }
 
-// SummaryAudit mirrors the auditor's verdict (filled in P5b).
+// SummaryRecords are the swarm's own records for the auditor.
+type SummaryRecords struct {
+	// AdmittedAfterSoldout counts ADMITTED answers to requests the swarm
+	// sent more than SoldOutGraceMS after it first saw the event sold out
+	// on /stats (null in direct mode: no waiting room).
+	AdmittedAfterSoldout *int64     `json:"admitted_after_soldout"`
+	Admissions           int64      `json:"admissions"`
+	SoldOutSeenAt        *time.Time `json:"sold_out_seen_at"`
+	SoldOutGraceMS       int64      `json:"sold_out_grace_ms"`
+	Note                 string     `json:"note,omitempty"`
+}
+
+// SummaryAudit mirrors the auditor's verdict (audit.json has the details).
+// A null count means the check does not apply in that mode.
 type SummaryAudit struct {
-	Oversold         int64 `json:"oversold"`
-	DuplicateCharges int64 `json:"duplicate_charges"`
-	OrphanCharges    int64 `json:"orphan_charges"`
-	QuotaViolations  int64 `json:"quota_violations"`
-	StuckHolds       int64 `json:"stuck_holds"`
-	InventoryDrift   int64 `json:"inventory_drift"`
-	Passed           bool  `json:"passed"`
+	Mode                   string  `json:"mode"`
+	Oversold               *int64  `json:"oversold"`
+	DuplicateCharges       *int64  `json:"duplicate_charges"`
+	OrphanCharges          *int64  `json:"orphan_charges"`
+	QuotaViolations        *int64  `json:"quota_violations"`
+	StuckHolds             *int64  `json:"stuck_holds"`
+	InventoryDrift         *int64  `json:"inventory_drift"`
+	TicketOrderConsistency *int64  `json:"ticket_order_consistency"`
+	AdmittedAfterSoldout   *int64  `json:"admitted_after_soldout"`
+	UnresolvedUsers        *int64  `json:"unresolved_users"`
+	SettleS                float64 `json:"settle_s"`
+	SettleTimedOut         bool    `json:"settle_timed_out"`
+	Passed                 bool    `json:"passed"`
+	ExitCode               int     `json:"exit_code"`
 }
 
 // SummaryHeadline is the claim's numbers.
@@ -222,6 +245,7 @@ func (s *swarm) summarize(started time.Time, ev eventInfo, rows map[int]statsRow
 	gen.CPUCoresMax = math.Round(gen.CPUCoresMax*100) / 100
 	sum.Generator = gen
 	sum.Outcomes["seats_sold"] = seatsSold
+	sum.Records = s.records(rows)
 
 	for rt := range numRoutes {
 		sum.Latency[rt.String()] = r.routes[rt].quantiles()
@@ -422,11 +446,105 @@ func RenderReport(s *Summary) string {
 		p("\n")
 	}
 	if s.Audit == nil {
-		p("## Audit\nNot run by the swarm (`sluice audit` runs after the rush).\n")
+		p("## Audit\nNot run yet (`sluice audit --results <run dir>`, or `sluice rush --audit`).\n")
 	} else {
 		a := s.Audit
-		p("## Audit\n| oversold | duplicate charges | orphan charges | quota violations | stuck holds | inventory drift | passed |\n|---|---|---|---|---|---|---|\n")
-		p("| %d | %d | %d | %d | %d | %d | %t |\n", a.Oversold, a.DuplicateCharges, a.OrphanCharges, a.QuotaViolations, a.StuckHolds, a.InventoryDrift, a.Passed)
+		n := func(v *int64) string {
+			if v == nil {
+				return "n/a"
+			}
+			return strconv.FormatInt(*v, 10)
+		}
+		timedOut := ""
+		if a.SettleTimedOut {
+			timedOut = " (timed out)"
+		}
+		p("## Audit (%s mode; details in audit.json)\n", a.Mode)
+		p("| oversold | duplicate charges | orphan charges | quota violations | stuck holds | inventory drift | ticket/order mismatches | admitted after sold out | unresolved | settle | passed | exit |\n|---|---|---|---|---|---|---|---|---|---|---|---|\n")
+		p("| %s | %s | %s | %s | %s | %s | %s | %s | %s | %.1f s%s | **%t** | %d |\n", n(a.Oversold), n(a.DuplicateCharges), n(a.OrphanCharges),
+			n(a.QuotaViolations), n(a.StuckHolds), n(a.InventoryDrift), n(a.TicketOrderConsistency), n(a.AdmittedAfterSoldout),
+			n(a.UnresolvedUsers), a.SettleS, timedOut, a.Passed, a.ExitCode)
 	}
 	return b.String()
+}
+
+// soldOutGrace: an admission counts as "after sold out" only if its request
+// left more than this after the swarm first saw sold out on /stats (the
+// sampler's 1 s resolution), so a request in flight at that moment is not
+// a false positive.
+const soldOutGrace = time.Second
+
+// records builds the swarm records for the auditor.
+func (s *swarm) records(rows map[int]statsRow) *SummaryRecords {
+	s.admitMu.Lock()
+	defer s.admitMu.Unlock()
+	r := &SummaryRecords{Admissions: int64(len(s.admitSent)), SoldOutGraceMS: soldOutGrace.Milliseconds()}
+	if s.o.Scenario.Direct {
+		r.Note = "direct mode: no waiting room, no admissions"
+		return r
+	}
+	for _, i := range sortedKeys(rows) {
+		if row := rows[i]; row.ok && row.SoldOut {
+			at := row.At.UTC()
+			r.SoldOutSeenAt = &at
+			break
+		}
+	}
+	var n int64
+	if r.SoldOutSeenAt == nil {
+		r.Note = "the swarm never saw the event sold out"
+	} else {
+		limit := r.SoldOutSeenAt.Add(soldOutGrace)
+		for _, t := range s.admitSent {
+			if t.After(limit) {
+				n++
+			}
+		}
+	}
+	r.AdmittedAfterSoldout = &n
+	return r
+}
+
+// ApplyAudit stores an audit verdict in dir/summary.json and re-renders
+// dir/report.md (used by `sluice audit --results` and `sluice rush --audit`).
+func ApplyAudit(dir string, a *SummaryAudit) (*Summary, error) {
+	path := filepath.Join(dir, "summary.json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("rush: read summary: %w", err)
+	}
+	var sum Summary
+	if err := json.Unmarshal(b, &sum); err != nil {
+		return nil, fmt.Errorf("rush: parse summary: %w", err)
+	}
+	sum.Audit = a
+	out, err := json.MarshalIndent(&sum, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("rush: encode summary: %w", err)
+	}
+	if err := os.WriteFile(path, append(out, '\n'), 0o600); err != nil {
+		return nil, fmt.Errorf("rush: write summary: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "report.md"), []byte(RenderReport(&sum)), 0o600); err != nil {
+		return nil, fmt.Errorf("rush: write report: %w", err)
+	}
+	return &sum, nil
+}
+
+// AuditSummary condenses an audit report into summary.json's audit block.
+func AuditSummary(r *audit.Report) *SummaryAudit {
+	count := func(name string) *int64 {
+		if c := r.Get(name); c != nil {
+			return c.Count
+		}
+		return nil
+	}
+	return &SummaryAudit{
+		Mode: r.Mode, Oversold: count(audit.CheckOversold), DuplicateCharges: count(audit.CheckDuplicateCharges),
+		OrphanCharges: count(audit.CheckOrphanCharges), QuotaViolations: count(audit.CheckQuotaViolations),
+		StuckHolds: count(audit.CheckStuckHolds), InventoryDrift: count(audit.CheckInventoryDrift),
+		TicketOrderConsistency: count(audit.CheckTicketOrder), AdmittedAfterSoldout: count(audit.CheckAdmittedAfterSold),
+		UnresolvedUsers: count(audit.CheckUnresolvedUsers), SettleS: math.Round(r.Settle.Seconds*10) / 10,
+		SettleTimedOut: r.Settle.TimedOut, Passed: r.Passed, ExitCode: r.ExitCode,
+	}
 }

@@ -15,6 +15,10 @@ x-sluice: &sluice
       COMMIT: ${SLUICE_COMMIT:-unknown}
   env_file:
     - env/${SLUICE_ENV:-rush}.env
+    # Scenario overlay (B0/B1/B2, LOADTEST §4): env/<env>.<scenario>.env,
+    # e.g. rush.b0.env. Absent for H/SMOKE (SLUICE_SCENARIO unset).
+    - path: env/${SLUICE_ENV:-rush}.${SLUICE_SCENARIO:-none}.env
+      required: false
   environment:
     # In-network hosts; the env profile carries everything else.
     DATABASE_URL: postgres://sluice:sluice@postgres:5432/sluice?sslmode=disable

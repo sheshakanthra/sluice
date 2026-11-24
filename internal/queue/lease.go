@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/sheshakanthra/sluice/internal/auth"
 	"github.com/sheshakanthra/sluice/internal/redisx"
@@ -66,35 +67,71 @@ func NewLease(sc *redisx.Scripts, idle time.Duration, now func() time.Time, log 
 	return l, nil
 }
 
-// Touch renews c's admission lease. It ignores every token that is not an
-// admission token, and never fails the request: errors are logged.
-func (l *Lease) Touch(ctx context.Context, c auth.Claims) {
+// Touch renews c's admission lease and reports its state (auth's
+// AdmissionCheck). It ignores every token that is not an admission token
+// (AdmissionLive). Errors are logged and reported as AdmissionError; only
+// RequireLive routes refuse on them.
+func (l *Lease) Touch(ctx context.Context, c auth.Claims) auth.AdmissionState {
 	if c.Audience != auth.AudAdmission || c.EventID == uuid.Nil {
-		return
+		return auth.AdmissionLive
 	}
-	res, err := l.Renew(ctx, c)
+	res, st, err := l.Renew(ctx, c)
 	if err != nil {
 		l.log.WarnContext(ctx, "admission lease renewal", slog.String("event_id", c.EventID.String()),
 			slog.String("error", err.Error()))
 	}
 	l.touches.WithLabelValues(res).Inc()
+	return st
 }
 
-// Renew runs queue_touch.lua for c and reports the result.
-func (l *Lease) Renew(ctx context.Context, c auth.Claims) (string, error) {
+// Renew runs queue_touch.lua for c and reports the renewal result and the
+// lease state.
+func (l *Lease) Renew(ctx context.Context, c auth.Claims) (string, auth.AdmissionState, error) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), touchTimeout)
 	defer cancel()
 	r, err := l.sc.Run(ctx, redisx.QueueTouch, keys.QueueTouchKeys(c.EventID), c.Subject.String(),
 		l.now().UnixMilli(), l.idle.Milliseconds(), c.ExpiresAt().UnixMilli())
 	if err != nil {
-		return TouchError, err
+		return TouchError, auth.AdmissionError, err
 	}
 	n, err := r.Int(0)
 	if err != nil {
-		return TouchError, fmt.Errorf("queue: touch reply: %w", err)
+		return TouchError, auth.AdmissionError, fmt.Errorf("queue: touch reply: %w", err)
+	}
+	if len(r.Fields) < 2 {
+		return TouchError, auth.AdmissionError, errors.New("queue: touch reply has no state")
+	}
+	var st auth.AdmissionState
+	switch state := r.Fields[1]; state {
+	case "LIVE":
+		st = auth.AdmissionLive
+	case "LAPSED":
+		st = auth.AdmissionLapsed
+	case "UNKNOWN":
+		st = auth.AdmissionUnknown
+	default:
+		return TouchError, auth.AdmissionError, fmt.Errorf("queue: touch state %q", state)
 	}
 	if n == 1 {
-		return TouchRenewed, nil
+		return TouchRenewed, st, nil
 	}
-	return TouchNoop, nil
+	return TouchNoop, st, nil
+}
+
+// Grant writes a fresh lease for an admission issued outside the queue
+// (POST /test/admit, rush/test only): q:active = min(now + idle, cap) and
+// q:cap = cap, the same entries queue_claim.lua writes, so RequireLive
+// treats the user like a claimed admission. Two ZADDs in one MULTI; no
+// script is needed because nothing is read.
+func (l *Lease) Grant(ctx context.Context, rdb redis.Cmdable, eid, uid uuid.UUID, capAt time.Time) error {
+	lease := min(l.now().Add(l.idle).UnixMilli(), capAt.UnixMilli())
+	_, err := rdb.TxPipelined(ctx, func(p redis.Pipeliner) error {
+		p.ZAdd(ctx, keys.QActive(eid), redis.Z{Score: float64(lease), Member: uid.String()})
+		p.ZAdd(ctx, keys.QCap(eid), redis.Z{Score: float64(capAt.UnixMilli()), Member: uid.String()})
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("queue: grant lease: %w", err)
+	}
+	return nil
 }

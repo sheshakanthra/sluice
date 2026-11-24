@@ -43,6 +43,10 @@ type HandlerDeps struct {
 	WebhookSecret string
 	Now           func() time.Time
 	Log           *slog.Logger
+	// Overrides replace the handlers of these routes (BASELINE naive or
+	// holds_only only, rush/test; ADR 0011). They run behind the same auth
+	// but without the idempotency middleware: the baselines have none.
+	Overrides map[string]http.Handler
 }
 
 // RegisterRoutes mounts the order, webhook and reconcile routes.
@@ -56,14 +60,21 @@ func RegisterRoutes(rt *httpx.Router, d HandlerDeps) {
 		createAuds = append(createAuds, auth.AudSession)
 		missing = httpx.CodeTokenInvalid
 	}
-	session := func(route string, h http.HandlerFunc, idem bool) {
-		var hh http.Handler = h
-		if idem {
-			hh = d.Idem.Wrap(route, hh)
+	// handler is the route's handler: its override as is, or h behind the
+	// idempotency middleware when idem is set.
+	handler := func(route string, h http.HandlerFunc, idem bool) http.Handler {
+		if o, ok := d.Overrides[route]; ok {
+			return o
 		}
-		rt.Handle(route, d.Keys.Require(httpx.CodeTokenInvalid, hh, auth.AudSession))
+		if idem {
+			return d.Idem.Wrap(route, h)
+		}
+		return h
 	}
-	rt.Handle(RouteCreate, d.Keys.Require(missing, d.Idem.Wrap(RouteCreate, http.HandlerFunc(d.create)), createAuds...))
+	session := func(route string, h http.HandlerFunc, idem bool) {
+		rt.Handle(route, d.Keys.Require(httpx.CodeTokenInvalid, handler(route, h, idem), auth.AudSession))
+	}
+	rt.Handle(RouteCreate, d.Keys.RequireLive(missing, handler(RouteCreate, d.create, true), createAuds...))
 	session(RoutePay, d.pay, true)
 	session(RouteNewAttempt, d.newAttempt, true)
 	session(RouteConfirm, d.confirm, true)

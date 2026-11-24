@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sheshakanthra/sluice/internal/audit"
 )
 
 // Conn modes.
@@ -56,6 +58,9 @@ type Options struct {
 	RedisVersion   string
 	UsersPerIP     int
 	ProgressEvery  time.Duration
+	// Audit, when set, runs the auditor on the results after the swarm
+	// (`--audit`); its mode is naive for B0.
+	Audit *audit.Options
 }
 
 // DefaultArrival is LOADTEST §3.1: 70% in the 10 s before T0, 30% in the 10 s after.
@@ -86,6 +91,7 @@ func ParseArgs(args []string, getenv Getenv, stderr io.Writer) (*Options, error)
 	fs.IntVar(&o.APIReplicas, "api-replicas", 3, "API replicas behind the front door (reported)")
 	fs.IntVar(&o.UsersPerIP, "users-per-ip", 10, "users sharing one synthetic X-Forwarded-For IP")
 	fs.DurationVar(&o.ProgressEvery, "progress", 5*time.Second, "progress line interval")
+	runAudit := fs.Bool("audit", false, "run `sluice audit` on the results afterwards (needs DATABASE_URL, MOCKPAY_DATABASE_URL, REDIS_URL, MOCKPAY_API_KEY)")
 	if err := fs.Parse(args); err != nil {
 		return nil, err
 	}
@@ -118,6 +124,17 @@ func ParseArgs(args []string, getenv Getenv, stderr io.Writer) (*Options, error)
 	}
 	if err := o.validate(); err != nil {
 		return nil, err
+	}
+	if *runAudit {
+		a := audit.Defaults(func(k string) string { return getenv(k) })
+		a.Event, a.Results, a.API = o.Event, o.Out, o.Target
+		if sc.Name == "B0" {
+			a.Mode = audit.ModeNaive
+		}
+		if err := a.Validate(); err != nil {
+			return nil, fmt.Errorf("--audit: %w", err)
+		}
+		o.Audit = a
 	}
 	return o, nil
 }

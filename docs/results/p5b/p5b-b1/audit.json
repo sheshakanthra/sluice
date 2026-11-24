@@ -1,0 +1,122 @@
+{
+  "event": "rush-1124-190453",
+  "event_id": "01a20dc4-d865-76ab-ace3-5fd38a77b4ea",
+  "mode": "normal",
+  "started_at": "2026-11-24T13:36:22.489233566Z",
+  "finished_at": "2026-11-24T13:36:54.736896247Z",
+  "settle": {
+    "seconds": 32.21177047,
+    "timed_out": false,
+    "polls": 34,
+    "reconcile": [
+      {
+        "orphans_fixed": 0,
+        "duplicates_fixed": 0,
+        "converged": 0,
+        "captures_requeued": 0,
+        "dead_holds_settled": 0,
+        "inventory_repaired": 0
+      },
+      {
+        "orphans_fixed": 0,
+        "duplicates_fixed": 0,
+        "converged": 0,
+        "captures_requeued": 0,
+        "dead_holds_settled": 0,
+        "inventory_repaired": 0
+      },
+      {
+        "orphans_fixed": 0,
+        "duplicates_fixed": 0,
+        "converged": 0,
+        "captures_requeued": 0,
+        "dead_holds_settled": 0,
+        "inventory_repaired": 0
+      }
+    ],
+    "pending_at_end": {
+      "jobs": 0,
+      "expired_holds": 0,
+      "webhooks": 0,
+      "young_intents": 0
+    }
+  },
+  "checks": [
+    {
+      "name": "oversold",
+      "count": 0,
+      "pass": true,
+      "detail": {
+        "capacity": 500,
+        "excess_over_capacity": 0,
+        "issued": 447,
+        "seats_sold_more_than_once": 0,
+        "source": "tickets"
+      }
+    },
+    {
+      "name": "duplicate_charges",
+      "count": 27,
+      "pass": false,
+      "detail": {
+        "definition": "merchant_refs (orders) with more than 1 captured intent net of refunds",
+        "extra_charges": 27,
+        "refs_in_ledger": 345
+      },
+      "examples": [
+        "01a20dc5-6deb-7f37-a2d8-eda52f3afa39: 2 captured, 0 refunded",
+        "01a20dc5-6eab-7712-b1ca-a832bd424a42: 2 captured, 0 refunded",
+        "01a20dc5-6fbe-7524-adff-7dd432f83c57: 2 captured, 0 refunded",
+        "01a20dc5-6fcb-7485-9032-7bc7700faeb4: 2 captured, 0 refunded",
+        "01a20dc5-6ffd-7071-8d04-d67f2ea90f48: 2 captured, 0 refunded"
+      ]
+    },
+    {
+      "name": "orphan_charges",
+      "count": 0,
+      "pass": true,
+      "detail": {
+        "definition": "captured-not-refunded intents whose order is not CONFIRMED"
+      }
+    },
+    {
+      "name": "quota_violations",
+      "count": 0,
+      "pass": true,
+      "detail": {
+        "max_per_user": 4
+      }
+    },
+    {
+      "name": "stuck_holds",
+      "count": 0,
+      "pass": true,
+      "detail": {
+        "grace_s": 2
+      }
+    },
+    {
+      "name": "inventory_drift",
+      "count": 0,
+      "pass": true
+    },
+    {
+      "name": "ticket_order_consistency",
+      "count": 0,
+      "pass": true
+    },
+    {
+      "name": "admitted_after_soldout",
+      "count": null,
+      "pass": true,
+      "note": "direct mode: no waiting room, no admissions"
+    },
+    {
+      "name": "unresolved_users",
+      "count": 0,
+      "pass": true
+    }
+  ],
+  "passed": false,
+  "exit_code": 1
+}

@@ -37,6 +37,10 @@ type HandlerDeps struct {
 	QueueEnforced bool
 	AdminToken    string
 	Log           *slog.Logger
+	// HoldOverride replaces the hold handler (BASELINE=naive only, rush/test;
+	// ADR 0011). It runs behind the same auth but without the idempotency
+	// middleware: the baseline has none.
+	HoldOverride http.Handler
 }
 
 // HoldResponse is the 201 body of POST /events/{id}/holds (API.md §3.4).
@@ -62,7 +66,11 @@ func RegisterRoutes(rt *httpx.Router, d HandlerDeps) {
 		auds = append(auds, auth.AudSession)
 		missing = httpx.CodeTokenInvalid
 	}
-	rt.Handle(RouteHold, d.Keys.Require(missing, d.Idem.Wrap(RouteHold, http.HandlerFunc(d.hold)), auds...))
+	if d.HoldOverride != nil {
+		rt.Handle(RouteHold, d.Keys.RequireLive(missing, d.HoldOverride, auds...))
+	} else {
+		rt.Handle(RouteHold, d.Keys.RequireLive(missing, d.Idem.Wrap(RouteHold, http.HandlerFunc(d.hold)), auds...))
+	}
 	rt.Handle(RouteRelease, d.Keys.Require(missing, http.HandlerFunc(d.release), auds...))
 	rt.HandleFunc(RouteAvailability, d.availability)
 	rt.Handle(RouteRebuild, auth.RequireAdmin(d.AdminToken, http.HandlerFunc(d.rebuild)))

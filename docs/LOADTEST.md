@@ -86,12 +86,15 @@ at once as NO_SEAT; only a SOLD_OUT answer is SOLD_OUT.
   "latency_ms": { "status": {"p50":0,"p95":0,"p99":0,"max":0,"n":0}, "join": {}, "hold": {}, "order": {}, "pay": {}, "confirm": {}, "checkout": {} },
   "errors": { "rate": 0.0, "5xx": 0, "timeouts": 0, "transport": 0 },
   "business": { "409": 0, "422": 0, "429": 0 },
-  "audit": { "oversold": 0, "duplicate_charges": 0, "orphan_charges": 0, "quota_violations": 0, "stuck_holds": 0, "inventory_drift": 0, "passed": true },
+  "audit": { "oversold": 0, "duplicate_charges": 0, "orphan_charges": 0, "quota_violations": 0, "stuck_holds": 0, "inventory_drift": 0, "passed": true,
+             "mode": "normal", "ticket_order_consistency": 0, "admitted_after_soldout": 0, "unresolved_users": 0, "settle_s": 0, "settle_timed_out": false, "exit_code": 0 },
+  "records": { "admitted_after_soldout": 0, "admissions": 0, "sold_out_seen_at": "...", "sold_out_grace_ms": 1000 },
   "headline": { "checkout_p95_ms": 0, "status_p95_ms": 0, "peak_rps": 0 } }
 ```
 - `timeseries.csv` with 1 s rows: `t, rps_total, rps_join, rps_status, rps_hold, rps_order, rps_pay, rps_confirm, p95_status_ms, p95_checkout_ms, errors, in_system, waiting, cursor, offers, active, available, held, sold, sold_out`
 - `report.md`: a human summary (the same tables as the job summary)
 - `audit.json`: the full auditor output
+- The `audit` block is `null` until `sluice audit --results <dir>` (or `sluice rush --audit`) merges its verdict in. A count is `null` when the check doesn't apply (naive mode: `stuck_holds`, `inventory_drift`; direct mode: `admitted_after_soldout`). `records` holds the swarm's own I7 count (ADR 0011).
 
 ## 4. Scenarios
 | ID | Users | Waiting room | Holds | Payments | Purpose | Expected |
@@ -106,28 +109,31 @@ at once as NO_SEAT; only a SOLD_OUT answer is SOLD_OUT.
 
 B0 doubles as the **auditor sensitivity test**: if the auditor reports 0 on B0, the auditor is broken.
 
+Scenario env overlays: `deploy/env/rush.b0.env`, `rush.b1.env`, `rush.b2.env` (selected by `SLUICE_SCENARIO`; `task rush:b0` etc. set it). In B0 the seats live in `naive_sales`, which `/stats` can't see, so B0's `seats_sold`/`sold_out_s` are not meaningful; the auditor's counts are the source. Baseline modes turn off only the reconciler's PSP-intent pass, so B1's duplicate charges aren't refunded before the audit (ADR 0011).
+
 ## 5. k6 cross-checks (Docker image `grafana/k6`, no install)
 - **K1 `spike-queue.js`:** `ramping-arrival-rate` to 3,000 iterations/s for 30 s. Each iteration is `POST /sessions` + `POST /queue`. Reports p95 for join and session; it should agree with the swarm's join p95 within ±20%.
 - **K2 `checkout.js`:** against the `loadtest-big` event (50,000 seats), `constant-arrival-rate` 200/s for 60 s. Each iteration is `POST /test/admit` + hold(1) + order + pay(`pm_ok`). Reports the checkout p95 and the **max sustainable checkouts/s** (raise the rate until p95 > 250 ms or errors > 0.1%).
 - Run with `K6_WEB_DASHBOARD=true K6_WEB_DASHBOARD_EXPORT=loadtest/results/<id>/k6.html` for a free HTML report.
 
 ## 6. Auditor (`sluice audit --event <slug> [--mode naive]`)
-1. **Settle** (≤ 120 s): call `POST /admin/reconcile`, then wait until there are no River jobs in `available/running/retryable` for this event, no holds past expiry, and no undelivered MockPay webhooks. Call reconcile once more.
+1. **Settle** (≤ 120 s): call `POST /admin/reconcile`, then wait until there are no River jobs in `available/running/retryable` (the periodic kinds `reconcile` and `audit_cache` excluded), no holds past expiry, no undelivered MockPay webhooks that still have attempts left, and no AUTHORIZED/CAPTURED intent younger than the orphan age (35 s). Call reconcile once more and wait for quiet again. The checks run even if settle times out (ADR 0011).
 2. **Checks** (each reports a count and examples):
 
 | Check | Source | Pass |
 |---|---|---|
-| oversold | `tickets` grouped by seat having > 1, plus tickets − capacity (naive mode: `naive_sales`) | 0 |
+| oversold | seats with > 1 **distinct** order in `tickets`, plus distinct (seat, order) pairs − capacity (naive mode: `naive_sales` by `order_ref`; one order's own repeat insert is one buyer) | 0 |
 | duplicate_charges | MockPay `/v1/ledger/summary`: merchant_refs with > 1 captured-not-refunded intent | 0 |
 | orphan_charges | Captured-not-refunded intents whose order isn't CONFIRMED | 0 |
 | quota_violations | Tickets per (event, user) > max_per_user | 0 |
 | stuck_holds | Holds ACTIVE/PAYMENT_PENDING with `expires_at < now() − 2 × SWEEPER_INTERVAL` | 0 |
 | inventory_drift | Redis avail/sold/held vs PG seat states | 0 |
 | ticket_order_consistency | Every ticket's order is CONFIRMED with a CAPTURED (or AUTHORIZED, capture pending) payment | 0 mismatches |
-| admitted_after_soldout | From swarm records: ADMITTED responses timestamped after `sold_out_at` | 0 |
+| admitted_after_soldout | From swarm records: ADMITTED answers whose request was sent > 1 s (the `/stats` poll interval) after the swarm first saw sold out; n/a in direct mode | 0 |
 | unresolved_users | From swarm records | 0 |
 
-3. Exit code: 0 if everything passes, 1 if any invariant fails, 2 if the settle times out.
+3. Exit code: 0 if everything passes, 1 if any invariant fails, 2 if the settle times out, 3 if the auditor itself couldn't run (bad flags, unreachable datastore).
+4. Runs as `sluice audit` (also the `audit` compose service, profile rush; `task audit EVENT=... [RESULTS=<run_id>] [MODE=naive]`) or at the end of `sluice rush --audit`. It reads Postgres (both databases), Redis and MockPay's ledger directly, and calls the admin reconcile route.
 
 ## 7. CI: `.github/workflows/rush.yml`
 - **Trigger:** `workflow_dispatch` with inputs `scenario` (H \| SMOKE \| B0 \| B1 \| B2) and `users`. `timeout-minutes: 60`.

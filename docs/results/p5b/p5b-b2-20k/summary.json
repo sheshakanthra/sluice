@@ -1,0 +1,186 @@
+{
+  "run_id": "p5b-b2-20k",
+  "git_sha": "570aefc",
+  "scenario": "B2",
+  "started_at": "2026-11-24T13:44:24.783296267Z",
+  "env": {
+    "runner": "local",
+    "cpus": 16,
+    "ram_gb": 9.7,
+    "go": "go1.27.4",
+    "postgres": "18.7",
+    "redis": "8.10.3"
+  },
+  "config": {
+    "users": 20000,
+    "seats": 500,
+    "hold_ttl_s": 60,
+    "payment_hold_ttl_s": 90,
+    "api_replicas": 3,
+    "event": "rush-1124-191344",
+    "conn": "dedicated",
+    "arrival": "pre=0.7:-10s..0s,post=0.3:0s..10s",
+    "opens_in_s": 30,
+    "seed": 42,
+    "direct": true
+  },
+  "load": {
+    "peak_in_system": 14984,
+    "requests": 113637,
+    "peak_rps": 13296,
+    "mean_rps": 1721.8,
+    "generator_lag_p99_ms": 137.3
+  },
+  "outcomes": {
+    "TICKET": 370,
+    "SOLD_OUT": 0,
+    "NO_SEAT": 19593,
+    "PAYMENT_FAILED": 0,
+    "ABANDONED": 33,
+    "UNRESOLVED": 4,
+    "seats_sold": 460
+  },
+  "timing": {
+    "t0": "2026-11-24T13:44:54.797Z",
+    "first_sale_s": 20.2,
+    "sold_out_s": null,
+    "drain_s": 55.4,
+    "window_from_s": -10
+  },
+  "latency_ms": {
+    "availability": {
+      "p50": 2113.5,
+      "p95": 5132.3,
+      "p99": 5304.3,
+      "max": 5668.9,
+      "n": 15352
+    },
+    "checkout": {
+      "p50": 2345,
+      "p95": 5103.6,
+      "p99": 5279.7,
+      "max": 5799.9,
+      "n": 60128
+    },
+    "confirm": {
+      "p50": 0,
+      "p95": 0,
+      "p99": 0,
+      "max": 0,
+      "n": 0
+    },
+    "hold": {
+      "p50": 2359.3,
+      "p95": 5107.7,
+      "p99": 5283.8,
+      "max": 5799.9,
+      "n": 57395
+    },
+    "join": {
+      "p50": 0,
+      "p95": 0,
+      "p99": 0,
+      "max": 0,
+      "n": 0
+    },
+    "leave": {
+      "p50": 0,
+      "p95": 0,
+      "p99": 0,
+      "max": 0,
+      "n": 0
+    },
+    "order": {
+      "p50": 2308.1,
+      "p95": 5029.9,
+      "p99": 5148.7,
+      "max": 5554.2,
+      "n": 1775
+    },
+    "pay": {
+      "p50": 1417.2,
+      "p95": 5005.3,
+      "p99": 5017.6,
+      "max": 5050.4,
+      "n": 958
+    },
+    "payments": {
+      "p50": 606.2,
+      "p95": 2469.9,
+      "p99": 2469.9,
+      "max": 2469.9,
+      "n": 10
+    },
+    "release": {
+      "p50": 0,
+      "p95": 0,
+      "p99": 0,
+      "max": 0,
+      "n": 0
+    },
+    "session": {
+      "p50": 37.3,
+      "p95": 5038.1,
+      "p99": 5189.6,
+      "max": 5709.8,
+      "n": 38147
+    },
+    "status": {
+      "p50": 0,
+      "p95": 0,
+      "p99": 0,
+      "max": 0,
+      "n": 0
+    }
+  },
+  "errors": {
+    "rate": 0.5727887923827627,
+    "5xx": 39178,
+    "timeouts": 25912,
+    "transport": 0
+  },
+  "business": {
+    "409": 21356,
+    "422": 0,
+    "429": 5
+  },
+  "anomalies": {},
+  "generator": {
+    "lag_p99_ms": 137.3,
+    "lag_max_ms": 484.4,
+    "cpu_cores_max": 3.81,
+    "cpu_cores_mean": 0.76,
+    "goroutines_max": 50264,
+    "generator_bound": true,
+    "stats_samples": 75,
+    "stats_failed": 13
+  },
+  "records": {
+    "admitted_after_soldout": null,
+    "admissions": 0,
+    "sold_out_seen_at": null,
+    "sold_out_grace_ms": 1000,
+    "note": "direct mode: no waiting room, no admissions"
+  },
+  "audit": {
+    "mode": "normal",
+    "oversold": 0,
+    "duplicate_charges": 0,
+    "orphan_charges": 0,
+    "quota_violations": 0,
+    "stuck_holds": 0,
+    "inventory_drift": 0,
+    "ticket_order_consistency": 0,
+    "admitted_after_soldout": null,
+    "unresolved_users": 4,
+    "settle_s": 35.7,
+    "settle_timed_out": false,
+    "passed": false,
+    "exit_code": 1
+  },
+  "headline": {
+    "checkout_p95_ms": 5103.6,
+    "status_p95_ms": 0,
+    "peak_rps": 13296
+  }
+}

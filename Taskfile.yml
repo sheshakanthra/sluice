@@ -188,15 +188,106 @@ tasks:
       - "{{.STACK}} run --rm -T seed seed --event {{.EVENT}} --capacity {{.SEATS}} --opens-in 30m"
       - "{{.STACK}} run --rm -T rush --target http://caddy:8000 --event {{.EVENT}} --scenario {{.SCENARIO}} --users {{.USERS}} --conn {{.CONN}} --opens-in {{.OPENS_IN}} {{.CLI_ARGS}}"
 
+  # ---------- the rush (LOADTEST.md) ----------
+  # Every rush task: fresh stack (down -v) -> build -> migrate -> seed -> swarm
+  # -> audit -> summary table. The task's exit code is the swarm/auditor's:
+  # 0 pass, 1 invariant failed or unresolved users, 2 settle timed out.
+  # B0 is EXPECTED to exit 1 (it proves the auditor catches oversells).
+  # The stack is left running for inspection; `task stack:down -- -v` stops it.
+  rush:scenario:
+    internal: true
+    vars:
+      SCENARIO: '{{.SCENARIO | default "SMOKE"}}'
+      OVERLAY: '{{.OVERLAY | default "none"}}'
+      USERS: '{{.USERS | default "5000"}}'
+      CONN: '{{.CONN | default "dedicated"}}'
+      OPENS_IN: '{{.OPENS_IN | default "30s"}}'
+      SEATS: '{{.SEATS | default "500"}}'
+      EVENT: '{{.EVENT | default (printf "rush-%s" (now | date "0102-150405"))}}'
+      RUN_ID: '{{.RUN_ID | default (printf "%s-%s" (lower .SCENARIO) (now | date "20060102-150405"))}}'
+    env:
+      SLUICE_ENV: "{{.ENV}}"
+      SLUICE_SCENARIO: "{{.OVERLAY}}"
+      SLUICE_VERSION: "{{.VERSION}}"
+      SLUICE_COMMIT: "{{.COMMIT}}"
+    cmds:
+      - "{{.STACK}} --profile rush down -v --remove-orphans"
+      - "{{.STACK}} build migrate"
+      - "{{.STACK}} up -d --wait"
+      - "{{.STACK}} run --rm -T seed seed --event {{.EVENT}} --capacity {{.SEATS}} --opens-in 30m"
+      - "{{.STACK}} run --rm -T rush --target http://caddy:8000 --event {{.EVENT}} --scenario {{.SCENARIO}} --users {{.USERS}} --conn {{.CONN}} --opens-in {{.OPENS_IN}} --run-id {{.RUN_ID}} --audit {{.CLI_ARGS}}"
+
   rush:smoke:
-    desc: "TODO(P5) 5k-user smoke rush + audit"
-    cmds: ["echo 'TODO(P5) - rush is not implemented yet' && exit 1"]
+    desc: "SMOKE: 5k users (USERS=...), waiting room on, correct system; then the audit. Must pass with every invariant 0"
+    cmds:
+      - task: rush:scenario
+        vars: { SCENARIO: SMOKE, USERS: '{{.USERS | default "5000"}}', CONN: '{{.CONN | default "dedicated"}}' }
   rush:
-    desc: "TODO(P5) 50k-user headline rush + audit"
-    cmds: ["echo 'TODO(P5) - rush is not implemented yet' && exit 1"]
+    desc: "H (headline): 50k users (USERS=...), dedicated connections; then the audit. The canonical run is CI (P7)"
+    cmds:
+      - task: rush:scenario
+        vars: { SCENARIO: H, USERS: '{{.USERS | default "50000"}}', CONN: '{{.CONN | default "dedicated"}}' }
+  rush:b0:
+    desc: "B0 naive baseline: 10k users (USERS=...), no waiting room, naive holds and payments. EXPECTED to fail the audit (exit 1)"
+    cmds:
+      - task: rush:scenario
+        vars: { SCENARIO: B0, OVERLAY: b0, USERS: '{{.USERS | default "10000"}}', CONN: '{{.CONN | default "dedicated"}}' }
+  rush:b1:
+    desc: "B1 holds-only baseline: 10k users (USERS=...), correct holds, naive payments. Expect oversold 0 and duplicate charges > 0 (exit 1)"
+    cmds:
+      - task: rush:scenario
+        vars: { SCENARIO: B1, OVERLAY: b1, USERS: '{{.USERS | default "10000"}}', CONN: '{{.CONN | default "dedicated"}}' }
+  rush:b2:
+    desc: "B2 direct: 10k users (USERS=...), the correct system without the waiting room. Must pass with every invariant 0"
+    cmds:
+      - task: rush:scenario
+        vars: { SCENARIO: B2, OVERLAY: b2, USERS: '{{.USERS | default "10000"}}', CONN: '{{.CONN | default "dedicated"}}' }
+
   audit:
-    desc: "TODO(P5) invariant auditor"
-    cmds: ["echo 'TODO(P5) - audit is not implemented yet' && exit 1"]
+    desc: "Run the auditor against the running stack: EVENT=<slug> [RESULTS=<run_id>] [MODE=naive] (exit 0 pass, 1 fail, 2 settle timeout, 3 error)"
+    requires:
+      vars: [EVENT]
+    env:
+      SLUICE_ENV: "{{.ENV}}"
+    cmds:
+      - "{{.STACK}} run --rm -T audit --event {{.EVENT}} --mode {{.MODE | default \"normal\"}} {{if .RESULTS}}--results /results/{{.RESULTS}}{{end}} {{.CLI_ARGS}}"
+
+  # ---------- k6 cross-checks (LOADTEST §5) ----------
+  # Fresh stack, then grafana/k6 on the compose network. Results (k6 summary
+  # JSON + HTML dashboard) land in loadtest/results/<run_id>/.
+  k6:run:
+    internal: true
+    vars:
+      RUN_ID: '{{.RUN_ID | default (printf "%s-%s" .NAME (now | date "20060102-150405"))}}'
+      EVENT: '{{.EVENT | default (printf "%s-%s" .NAME (now | date "0102-150405"))}}'
+    env:
+      SLUICE_ENV: "{{.ENV}}"
+      SLUICE_VERSION: "{{.VERSION}}"
+      SLUICE_COMMIT: "{{.COMMIT}}"
+    cmds:
+      - "{{.STACK}} --profile rush down -v --remove-orphans"
+      - "{{.STACK}} build migrate"
+      - "{{.STACK}} up -d --wait"
+      - "{{.STACK}} run --rm -T seed seed --event {{.EVENT}} --capacity {{.SEATS}} --opens-in 30m"
+      - mkdir -p loadtest/results/{{.RUN_ID}}
+      - >-
+        docker run --rm --network sluice_default
+        -v "{{.ROOT_DIR}}/loadtest:/loadtest"
+        --env-file deploy/env/{{.ENV}}.env
+        -e BASE=http://caddy:8000 -e EVENT={{.EVENT}} -e OUT=/loadtest/results/{{.RUN_ID}} {{.K6_ENV}}
+        -e K6_WEB_DASHBOARD=true -e K6_WEB_DASHBOARD_EXPORT=/loadtest/results/{{.RUN_ID}}/k6.html
+        grafana/k6:1.4.0 run --summary-export=/loadtest/results/{{.RUN_ID}}/k6-summary.json /loadtest/k6/{{.SCRIPT}}
+
+  k6:spike:
+    desc: "K1: k6 queue-join spike (ramping-arrival-rate to RATE=3000/s for 30 s; session + join per iteration)"
+    cmds:
+      - task: k6:run
+        vars: { NAME: k1, SCRIPT: spike-queue.js, SEATS: "500", K6_ENV: '-e RATE={{.RATE | default "3000"}}' }
+  k6:checkout:
+    desc: "K2: k6 checkout capacity on a 50k-seat event: STEPS=200,... checkouts/s, STEP_S seconds each (default 200/s for 60 s)"
+    cmds:
+      - task: k6:run
+        vars: { NAME: k2, SCRIPT: checkout.js, SEATS: "50000", K6_ENV: '-e STEPS={{.STEPS | default "200"}} -e STEP_S={{.STEP_S | default "60"}}' }
   e2e:
     desc: "TODO(P6) Playwright e2e"
     cmds: ["echo 'TODO(P6) - e2e is not implemented yet' && exit 1"]

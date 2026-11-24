@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/sheshakanthra/sluice/internal/app"
+	"github.com/sheshakanthra/sluice/internal/audit"
 	"github.com/sheshakanthra/sluice/internal/buildinfo"
 	"github.com/sheshakanthra/sluice/internal/config"
 	"github.com/sheshakanthra/sluice/internal/events"
@@ -26,10 +27,9 @@ import (
 
 // Exit codes.
 const (
-	exitOK       = 0
-	exitFailure  = 1
-	exitUsage    = 2 // also "not implemented yet"
-	notImplPhase = "not implemented yet"
+	exitOK      = 0
+	exitFailure = 1
+	exitUsage   = 2
 )
 
 const usage = `usage: sluice <command>
@@ -44,7 +44,8 @@ commands:
             --capacity <n>      seats for --event (APP_ENV=rush or test only)
             --opens-in <dur>    sale opens after this duration (e.g. 10m, 30s)
   rush      run the load-test swarm (sluice rush -h for flags)
-  audit     check invariants against a running stack
+  audit     settle, then check every invariant (sluice audit -h); exit 0 pass,
+            1 invariant failed, 2 settle timed out, 3 the auditor could not run
   probe     GET <url>, exit 0 on 2xx (container healthchecks; distroless has no curl)
   version   print version and commit
 `
@@ -87,8 +88,7 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	case "probe":
 		return runProbe(ctx, args[1:], stderr)
 	case "audit":
-		_, _ = fmt.Fprintf(stderr, "sluice %s: %s\n", cmd, notImplPhase)
-		return exitUsage
+		return runAudit(ctx, args[1:], stdout, stderr)
 	default:
 		_, _ = fmt.Fprintf(stderr, "sluice: unknown command %q\n\n%s", cmd, usage)
 		return exitUsage
@@ -109,12 +109,60 @@ func runRush(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "sluice rush: %v\n", err)
 		return exitFailure
 	}
+	code := exitOK
+	if opts.Audit != nil {
+		var s *rush.Summary
+		if s, code = auditRun(ctx, opts.Audit, stdout, stderr); s != nil {
+			sum = s
+		}
+	}
 	_, _ = fmt.Fprint(stdout, "\n"+rush.RenderReport(sum))
+	if code != exitOK {
+		return code
+	}
 	if sum.Outcomes["UNRESOLVED"] > 0 {
 		_, _ = fmt.Fprintf(stderr, "sluice rush: %d unresolved users\n", sum.Outcomes["UNRESOLVED"])
 		return exitFailure
 	}
 	return exitOK
+}
+
+// exitAuditError: the auditor itself could not run (bad flags, a datastore
+// it cannot reach). 0, 1 and 2 are the verdicts (LOADTEST §6).
+const exitAuditError = 3
+
+// runAudit is `sluice audit`: settle, check, write audit.json (and, with
+// --results, the summary's audit block and report.md).
+func runAudit(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	o, err := audit.ParseArgs(args, os.Getenv, stderr)
+	if err != nil {
+		if !errors.Is(err, flag.ErrHelp) {
+			_, _ = fmt.Fprintf(stderr, "sluice audit: %v\n", err)
+		}
+		return exitAuditError
+	}
+	_, code := auditRun(ctx, o, stdout, stderr)
+	return code
+}
+
+// auditRun runs the auditor and, when o.Results is set, stores the verdict
+// in that run's summary.json. It returns the updated summary (nil without
+// --results) and the exit code.
+func auditRun(ctx context.Context, o *audit.Options, stdout, stderr io.Writer) (*rush.Summary, int) {
+	rep, err := audit.Run(ctx, o, stdout)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "sluice audit: %v\n", err)
+		return nil, exitAuditError
+	}
+	if o.Results == "" {
+		return nil, rep.ExitCode
+	}
+	sum, err := rush.ApplyAudit(o.Results, rush.AuditSummary(rep))
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "sluice audit: %v\n", err)
+		return nil, exitAuditError
+	}
+	return sum, rep.ExitCode
 }
 
 // runProbe is the container healthcheck: GET the URL, exit 0 on 2xx.

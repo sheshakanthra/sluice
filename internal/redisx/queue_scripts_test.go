@@ -85,32 +85,46 @@ func TestAdmissionLease(t *testing.T) {
 		t.Errorf("re-claim = %s, want the same cap", got)
 	}
 
-	tests := []struct {
+	type step struct {
 		name    string
 		uid     uuid.UUID
 		now     int64
 		want    string
 		wantExp int64 // 0: not in q:active
-	}{
-		{"renew slides the lease", users[0], t0 + 30_000, "[OK 1]", t0 + 30_000 + idle},
-		{"an older request never shortens it", users[0], t0 + 10_000, "[OK 0]", t0 + 30_000 + idle},
-		{"near the cap the lease stops at the cap", users[0], capMS - 1_000, "[OK 1]", capMS},
-		{"past the cap nothing renews", users[0], capMS + 1, "[OK 0]", capMS},
-		{"a user who never claimed is not created", uuid.New(), t0, "[OK 0]", 0},
 	}
-	for _, tc := range tests {
-		if got := reply(f.touch(tc.uid, tc.now, idle, capMS)); got != tc.want {
-			t.Errorf("%s: touch = %s, want %s", tc.name, got, tc.want)
-		}
-		l, ok := f.lease(tc.uid)
-		if (tc.wantExp == 0 && ok) || (tc.wantExp != 0 && l != tc.wantExp) {
-			t.Errorf("%s: lease = %d (present %v), want %d", tc.name, l, ok, tc.wantExp)
+	check := func(steps []step) {
+		t.Helper()
+		for _, tc := range steps {
+			if got := reply(f.touch(tc.uid, tc.now, idle, capMS)); got != tc.want {
+				t.Errorf("%s: touch = %s, want %s", tc.name, got, tc.want)
+			}
+			l, ok := f.lease(tc.uid)
+			if (tc.wantExp == 0 && ok) || (tc.wantExp != 0 && l != tc.wantExp) {
+				t.Errorf("%s: lease = %d (present %v), want %d", tc.name, l, ok, tc.wantExp)
+			}
 		}
 	}
+	check([]step{
+		{"renew slides the lease", users[0], t0 + 30_000, "[OK 1 LIVE]", t0 + 30_000 + idle},
+		{"an older request never shortens it", users[0], t0 + 10_000, "[OK 0 LIVE]", t0 + 30_000 + idle},
+		{"a user who never claimed is not created", uuid.New(), t0, "[OK 0 LAPSED]", 0},
+		// Lapsed by idleness but not yet pruned by the tick: never revived.
+		{"an idle lapsed lease is not revived", users[2], t0 + idle + 5, "[OK 0 LAPSED]", t0 + idle},
+	})
+	// users[0] keeps renewing (every 50 s, inside the idle TTL) while the
+	// renewed lease stays below the cap.
+	now := t0 + 30_000
+	for ; now+50_000+idle < capMS; now += 50_000 {
+		check([]step{{"periodic renewal", users[0], now + 50_000, "[OK 1 LIVE]", now + 50_000 + idle}})
+	}
+	check([]step{
+		{"near the cap the lease stops at the cap", users[0], capMS - idle + 1_000, "[OK 1 LIVE]", capMS},
+		{"past the cap the admission has lapsed", users[0], capMS + 1, "[OK 0 LAPSED]", capMS},
+	})
 
 	// An admission that ended (left the queue) is never brought back.
 	f.run(redisx.QueueLeave, keys.QueueLeaveKeys(f.eid, users[1]), users[1].String(), 2)
-	if got := reply(f.touch(users[1], t0+1_000, idle, capMS)); got != "[OK 0]" {
+	if got := reply(f.touch(users[1], t0+1_000, idle, capMS)); got != "[OK 0 LAPSED]" {
 		t.Errorf("touch after leave = %s", got)
 	}
 	if _, ok := f.lease(users[1]); ok {
@@ -132,6 +146,16 @@ func TestAdmissionLease(t *testing.T) {
 	}
 	if n := f.rdb.ZCard(f.ctx, keys.QCap(f.eid)).Val(); n != 0 {
 		t.Errorf("q:cap has %d entries after every cap passed", n)
+	}
+
+	// Redis lost the queue state (no q:init, R1): q:active cannot answer,
+	// so the touch reports UNKNOWN and writes nothing.
+	f.rdb.Del(f.ctx, keys.QInit(f.eid))
+	if got := reply(f.touch(users[2], capMS+2, idle, capMS+600_000)); got != "[OK 0 UNKNOWN]" {
+		t.Errorf("touch without q:init = %s", got)
+	}
+	if _, ok := f.lease(users[2]); ok {
+		t.Error("touch without q:init created a lease")
 	}
 }
 

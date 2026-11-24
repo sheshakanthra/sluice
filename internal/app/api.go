@@ -130,12 +130,20 @@ func APIHandler(ctx context.Context, d Deps) (http.Handler, error) {
 			}
 			return ev.ID, true, nil
 		}
-		rt.HandleFunc("POST /api/v1/test/admit", keyring.TestAdmitHandler(resolve, d.Config.AdmissionTTL, d.Log))
+		rt.HandleFunc("POST /api/v1/test/admit", keyring.TestAdmitHandler(resolve, d.Config.AdmissionTTL,
+			func(ctx context.Context, eid, uid uuid.UUID, capAt time.Time) error {
+				return lease.Grant(ctx, d.Redis, eid, uid, capAt)
+			}, d.Log))
+	}
+	base, err := newBaseline(d.Config, d.Log, q, inv, ord)
+	if err != nil {
+		return nil, err
 	}
 	inventory.RegisterRoutes(rt, inventory.HandlerDeps{
 		Svc: inv, Avail: avail, Keys: keyring,
 		Idem:          idem,
 		QueueEnforced: d.Config.QueueEnforced, AdminToken: d.Config.AdminToken, Log: d.Log,
+		HoldOverride: base.hold,
 	})
 	restorer, err := newQueueRestorer(d.Config, d.Log, q, sc)
 	if err != nil {
@@ -159,6 +167,7 @@ func APIHandler(ctx context.Context, d Deps) (http.Handler, error) {
 	orders.RegisterRoutes(rt, orders.HandlerDeps{
 		Svc: ord, Keys: keyring, Idem: idem, QueueEnforced: d.Config.QueueEnforced,
 		AdminToken: d.Config.AdminToken, WebhookSecret: d.Config.MockpayWebhookSecret, Log: d.Log,
+		Overrides: base.orders,
 	})
 
 	m := httpx.NewHTTPMetrics(d.Registry, "api")

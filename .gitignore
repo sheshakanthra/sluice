@@ -4,6 +4,8 @@
 !.env.example
 deploy/env/*.env
 !deploy/env/rush.env
+# Scenario overlays (LOADTEST §4): QUEUE_ENFORCED / BASELINE only, no secrets.
+!deploy/env/rush.b[0-2].env
 
 # --- Go ---
 /bin/

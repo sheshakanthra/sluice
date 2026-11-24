@@ -3,6 +3,7 @@ package queue_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -267,4 +268,88 @@ func TestAdmissionRequestRenewsLease(t *testing.T) {
 	if l, ok := e.leaseOf(a.u.id); !ok || !l.Equal(e.clk.Now().Add(idle)) {
 		t.Fatalf("lease %s (present %v), want renewed to now + idle", l, ok)
 	}
+}
+
+// TestLapsedAdmissionCannotHold (ADR 0010 addendum part 3): POST /holds
+// goes through Keyring.RequireLive with the lease check, as the API wires
+// it. A user whose lease lapsed gets 403 ADMISSION_EXPIRED even though
+// their token is still valid, whether the tick has pruned the lease yet or
+// not, and the refusal does not revive the lease. An active user can hold.
+// The lapsed user's status answers OFFER_EXPIRED and a rejoin is honoured.
+// A user whose checkout ended (hold released, admission freed) cannot hold
+// again on the same token.
+func TestLapsedAdmissionCannotHold(t *testing.T) {
+	pgs.Require(t)
+	e := newEnv(t, capacity(10), idleTTL(idle))
+	e.toT0(0)
+	users := e.joinAll(6, 2)
+	adm := e.admitFirst(users, 2)
+	active, lapsed := adm[0], adm[1]
+	rt := httpx.NewRouter()
+	inventory.RegisterRoutes(rt, inventory.HandlerDeps{Svc: e.inv, Keys: e.keys.WithAdmissionTouch(e.lease.Touch),
+		Idem: httpx.NewIdempotency(e.q, auth.UserID, slog.New(slog.DiscardHandler), nil), QueueEnforced: true})
+	hold := func(a admitted) *httptest.ResponseRecorder {
+		req := httptest.NewRequestWithContext(e.ctx, http.MethodPost, "/api/v1/events/"+e.ev.ID.String()+"/holds",
+			bytes.NewBufferString(`{"quantity":1}`))
+		req.Header.Set("Authorization", "Bearer "+a.token)
+		req.Header.Set(httpx.IdempotencyHeader, uuid.NewString())
+		req.Header.Set("Content-Type", "application/json")
+		rec := httptest.NewRecorder()
+		rt.ServeHTTP(rec, req)
+		return rec
+	}
+	wantExpired := func(step string, a admitted) {
+		t.Helper()
+		rec := hold(a)
+		if rec.Code != http.StatusForbidden || !bytes.Contains(rec.Body.Bytes(), []byte(`"code":"ADMISSION_EXPIRED"`)) {
+			t.Fatalf("%s: hold = HTTP %d %s, want 403 ADMISSION_EXPIRED", step, rec.Code, rec.Body)
+		}
+		if n := e.rdb.SIsMember(e.ctx, keys.Holding(e.ev.ID), a.u.id.String()).Val(); n {
+			t.Fatalf("%s: a refused user is in holding", step)
+		}
+	}
+
+	e.clk.Advance(45 * time.Second)
+	e.lease.Touch(e.ctx, active.claims) // active: lease to t = 105 s
+	e.clk.Advance(20 * time.Second)     // t = 65 s: the other lease ended at 60 s; no tick yet
+
+	wantExpired("lapsed, not yet pruned", lapsed)
+	if l, ok := e.leaseOf(lapsed.u.id); !ok || !l.Equal(e.ev.SaleOpensAt.Add(idle)) {
+		t.Fatalf("refused request moved the lapsed lease to %s (present %v)", l, ok)
+	}
+	rec := hold(active)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("active user: hold = HTTP %d %s, want 201", rec.Code, rec.Body)
+	}
+	e.tick() // prunes the lapsed lease
+	wantExpired("lapsed and pruned", lapsed)
+
+	// The client may rejoin: status says OFFER_EXPIRED and the rejoin is honoured.
+	if r := e.status(lapsed.u); r.State != queue.StateOfferExpired {
+		t.Fatalf("lapsed user's status = %s, want OFFER_EXPIRED", r.State)
+	}
+	old := lapsed.u.ticket
+	r, err := e.join(lapsed.u, true)
+	mustNil(t, err)
+	if r.TicketNo == nil || *r.TicketNo <= old {
+		t.Fatalf("rejoin gave ticket %v, want a new ticket after %d", r.TicketNo, old)
+	}
+
+	// A finished checkout ends the admission: release the hold, then the
+	// same (still valid) token cannot hold again.
+	var b struct {
+		HoldID string `json:"hold_id"`
+	}
+	mustNil(t, json.Unmarshal(rec.Body.Bytes(), &b))
+	rel := httptest.NewRequestWithContext(e.ctx, http.MethodDelete, "/api/v1/holds/"+b.HoldID, nil)
+	rel.Header.Set("Authorization", "Bearer "+active.token)
+	relRec := httptest.NewRecorder()
+	rt.ServeHTTP(relRec, rel)
+	if relRec.Code >= 300 {
+		t.Fatalf("release: HTTP %d %s", relRec.Code, relRec.Body)
+	}
+	if _, ok := e.leaseOf(active.u.id); ok {
+		t.Fatal("released hold did not free the admission")
+	}
+	wantExpired("checkout ended", active)
 }

@@ -1,0 +1,22 @@
+{
+  "test": "K1 spike-queue",
+  "target_rate_per_s": 3000,
+  "iterations": 93660,
+  "achieved_iterations_per_s": 2080.7217249722535,
+  "dropped_iterations": 18839,
+  "joins_ok": 93660,
+  "error_rate": 0,
+  "join_ms": {
+    "p50": 361.902561,
+    "p95": 544.8481998500001,
+    "p99": 724.7155746700003,
+    "max": 1226.288012
+  },
+  "session_ms": {
+    "p50": 125.2609835,
+    "p95": 221.58559630000002,
+    "p99": 310.3459578900002
+  },
+  "vus_max": 1500,
+  "note": "k6 times each request from when it is sent (no intended-start correction); iterations k6 could not start are dropped_iterations"
+}

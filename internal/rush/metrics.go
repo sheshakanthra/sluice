@@ -23,10 +23,11 @@ const (
 	rPay
 	rPayments
 	rConfirm
+	rRelease
 	numRoutes
 )
 
-var routeNames = [numRoutes]string{"session", "join", "status", "leave", "availability", "hold", "order", "pay", "payments", "confirm"}
+var routeNames = [numRoutes]string{"session", "join", "status", "leave", "availability", "hold", "order", "pay", "payments", "confirm", "release"}
 
 func (r route) String() string { return routeNames[r] }
 

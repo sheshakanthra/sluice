@@ -96,3 +96,33 @@ Same command (`task rush:run USERS=2000`, seed 42, pooled), run `smoke-20261124-
 - After a Redis flush, `queue_restore` brings back `q:active` (with the lease expiry) but not `q:cap`; a re-claim then reports the lease expiry as the cap, so a restore can shorten an admission but never extend one. The user's existing token keeps its original `exp`.
 - Tests: `TestAdmissionLease` (script contract: claim scores, XX/GT/cap, no resurrection after leave, tick pruning), `TestRequireTouchesAdmissionTokens` (only valid admission tokens touch), `TestIdleAdmissionExpiresAndSlotRefills`, `TestActiveAdmissionLivesToHardCap`, `TestConcurrentTouchesNeverResurrect` (300 users, 150 checking out, two controllers; fails with 150 resurrected admissions when `XX` is removed), `TestAdmissionRequestRenewsLease` (POST /holds through the real middleware), and the swarm's `TestNoSeatAndAbandonLeaveQueue`.
 - Docs updated: ARCHITECTURE §5, DATA-MODEL §4/§5, API.md §1/§3.3, STACK §4, LOADTEST §3.2, DESIGN-BRIEF §5.
+
+## Addendum, part 3 (2026-11-24): a lapsed lease ends the admission
+
+**Status:** accepted (owner decision, session P5b step 0).
+
+### Context
+Parts 1 and 2 took finished and idle users out of the controller's count, but their admission tokens stayed valid until `exp`. Such a user could come back and hold, or create an order, outside `seeking`, bounded only by `HOLD_LIMIT` and I4. The owner decided that a lapsed lease ends the admission.
+
+### Decision
+- `POST /holds` and `POST /orders` require a **live** lease in Redis (`q:active` score > now), not only a valid JWT. A lapsed lease gets **403 `ADMISSION_EXPIRED`** (a new code, API.md §1.3), and the client may rejoin (`POST /queue?rejoin=true`, two-rejoin limit). `queue_join`'s rejoin rule already treats a lease with score ≤ now as ended, so the refusal and the rejoin agree.
+- **No extra round trip.** Both routes already make one Redis call per request before the handler: the lease renewal. `queue_touch.lua` now also reports the state, `{OK, renewed, LIVE | LAPSED | UNKNOWN}`. The new `Keyring.RequireLive`, used only by those two routes, refuses `LAPSED`. `Keyring.Require`, used by every other admission route such as `DELETE /holds/{id}` and `DELETE /queue`, renews and ignores the state, so a user can always give seats or the slot back.
+- **A lapsed lease is never renewed.** Before this change, a lease whose score had passed but that the tick had not yet pruned (≤ one tick interval) was renewed by `ZADD XX GT`, which brought an ended admission back. The script now checks `score > now` first.
+- **Fail closed on error.** If the check fails (Redis unreachable, 500 ms timeout), the two routes answer 503 `DEPENDENCY_UNAVAILABLE` with `Retry-After: 1`. The hold path is Redis-first anyway, and a gate that fails open is not a gate.
+- **R1.** A missing `q:init` means Redis lost the queue state, and `q:active` can't answer. The script returns `UNKNOWN`, and the token alone decides, as it did before this change. Once `queue_restore` runs, `q:active` comes back from the snapshot and the check applies again. Admissions claimed after the last snapshot (≤ 1 s) are missing from `q:active`, so they get `ADMISSION_EXPIRED` and rejoin.
+- **`POST /test/admit`** (rush/test only) writes a lease the way a claim does: `q:active` = min(now + idle, cap) and `q:cap` = cap, in one MULTI. K2 and other test-admitted users therefore pass the check.
+- **Direct mode** (`QUEUE_ENFORCED=false`, B0–B2) with a session token is not checked.
+- **Swarm:** on `ADMISSION_EXPIRED` from a hold, the user rejoins. On `ADMISSION_EXPIRED` from an order, the user first releases the hold (`DELETE /holds/{id}`) and then rejoins. Rejoins share the existing two-rejoin budget, and a third ends as NO_SEAT.
+
+### Accepted gap
+The check and the hold script are two Redis calls, not one script. A release that ends the user's admission (`hold_release`/`hold_consume`) can land between them, so the hold goes ahead on an admission that has just ended. That needs the same user to start a new hold while their previous hold or order is ending, and `HOLD_LIMIT` and I4 still bind. Moving the check into `hold_seats`/`hold_best` would close the gap for holds but not for orders, and both scripts would also need `q:active` and `q:init`. That was judged not worth it.
+
+### Consequences
+- Nobody can spend an admission the controller no longer counts. I7's "admitted-and-seeking ≤ target" now holds for returning users too.
+- A user who is idle for `ADMISSION_IDLE_TTL` (60 s in `rush`) between admission and hold, or between hold and order, must rejoin. The swarm's think times (1–4 s and 2–6 s) are far below that.
+- Tests:
+  - `TestAdmissionLease`: LIVE, LAPSED and UNKNOWN, and a lapsed lease is not revived.
+  - `TestRequireLiveGate`: 403 on lapsed, 503 on error, UNKNOWN passes, and session tokens and `Require` are unaffected.
+  - `TestLapsedAdmissionCannotHold` (real Redis and PG): a lapsed user gets 403 and no hold, both before and after pruning; an active user gets 201; the status says OFFER_EXPIRED and the rejoin is honoured; a released checkout can't hold again.
+  - `TestOrderCreateRefusesLapsedAdmission`: lapsed → 403 and no order; live → 201.
+  - Mutation check: with the gate disabled, both integration tests fail because the lapsed user gets 201.

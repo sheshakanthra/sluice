@@ -95,7 +95,7 @@ func QueueClaimKeys(eid uuid.UUID) []string {
 func QCap(eid uuid.UUID) string { return k(eid, "q:cap") }
 
 // QueueTouchKeys are queue_touch.lua's KEYS, in order.
-func QueueTouchKeys(eid uuid.UUID) []string { return []string{QActive(eid)} }
+func QueueTouchKeys(eid uuid.UUID) []string { return []string{QActive(eid), QInit(eid)} }
 
 // QueueLeaveKeys are queue_leave.lua's KEYS, in order.
 func QueueLeaveKeys(eid, uid uuid.UUID) []string {

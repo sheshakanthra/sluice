@@ -31,6 +31,17 @@ type swarm struct {
 
 	anomMu    sync.Mutex
 	anomalies map[string]int64
+
+	// admitMu guards admitSent: when each ADMITTED answer's request was sent
+	// (the auditor's admitted_after_soldout check, LOADTEST §6).
+	admitMu   sync.Mutex
+	admitSent []time.Time
+}
+
+func (s *swarm) recordAdmit(sent time.Time) {
+	s.admitMu.Lock()
+	s.admitSent = append(s.admitSent, sent)
+	s.admitMu.Unlock()
 }
 
 func (s *swarm) enter() {
@@ -104,6 +115,7 @@ type statsRow struct {
 	InSystem, Waiting, Cursor, Offers, Active int64
 	Available, Held, Sold                     int64
 	SoldOut                                   bool
+	At                                        time.Time // when the /stats answer arrived
 	Goroutines                                int
 	CPUCores                                  float64
 	ok                                        bool
@@ -282,7 +294,7 @@ func (s *swarm) sample(ctx context.Context, c *http.Client, mu *sync.Mutex, rows
 				InSystem: s.inSystem.Load(), Goroutines: runtime.NumGoroutine(), CPUCores: cpu.read(),
 			}
 			if b, ok := fetchStats(ctx, c, s.base+"/stats/"+url.PathEscape(s.o.Event)); ok {
-				row.ok = true
+				row.ok, row.At = true, time.Now()
 				row.Waiting, row.Cursor, row.Offers, row.Active = b.Queue.Waiting, b.Queue.Cursor, b.Queue.Offers, b.Queue.Active
 				row.Available, row.Held, row.Sold = b.Inventory.Available, b.Inventory.Held, b.Inventory.Sold
 				row.SoldOut = b.EventStatus == "SOLD_OUT" || (b.Inventory.Capacity > 0 && b.Inventory.Sold >= b.Inventory.Capacity)

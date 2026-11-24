@@ -171,17 +171,30 @@ ALTER TABLE queue_snapshots
 ```
 `UpsertQueueSnapshot` only replaces a row whose `taken_at` is not newer, so a slow writer never regresses it.
 
-**`0003_naive_baseline.sql`** (P5, baseline only, deliberately unsafe; renumbered from 0002 by ADR 0009):
+**`0003_naive_baseline.sql`** (P5, baseline only, deliberately unsafe; renumbered from 0002 by ADR 0009; shape per ADR 0011). Used only when `BASELINE=naive`; nothing in the real system reads these tables, and `/stats` cannot see them:
 ```sql
--- DEMO ONLY: used when BASELINE=naive to reproduce oversells. No constraints by design.
-CREATE TABLE naive_sales (
-  id        bigserial PRIMARY KEY,
-  event_id  uuid NOT NULL,
-  seat_no   int  NOT NULL,
-  user_id   uuid NOT NULL,
-  order_ref uuid NOT NULL,
-  sold_at   timestamptz NOT NULL DEFAULT now()
+-- BASELINE ONLY: check-then-insert sales so concurrent buyers can sell one seat twice.
+CREATE TABLE naive_orders (
+  order_ref     uuid PRIMARY KEY,                    -- the pseudo-hold id, then the order id
+  event_id      uuid NOT NULL,
+  user_id       uuid NOT NULL,
+  seat_nos      int[] NOT NULL,
+  amount_paise  bigint NOT NULL,
+  status        text NOT NULL DEFAULT 'PENDING_PAYMENT',  -- PENDING_PAYMENT | CONFIRMED | FAILED
+  attempts      int NOT NULL DEFAULT 1,
+  pay_status    text NOT NULL DEFAULT 'CREATED',          -- last payment: CREATED | CAPTURED | FAILED
+  created_at    timestamptz NOT NULL DEFAULT now()
 );
+
+CREATE TABLE naive_sales (                           -- deliberately no UNIQUE (event_id, seat_no)
+  id         bigserial PRIMARY KEY,
+  event_id   uuid NOT NULL,
+  seat_no    int NOT NULL,
+  order_ref  uuid NOT NULL,
+  user_id    uuid NOT NULL,
+  sold_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX naive_sales_lookup_idx ON naive_sales (event_id, seat_no);   -- an index, not a constraint
 ```
 
 ## 2. Postgres: `mockpay` database (owned by the MockPay service only)
@@ -326,7 +339,7 @@ Hold ids are deterministic: `hid = UUIDv5(NS_HOLD, user_id || ':' || idempotency
 | `queue_join.lua` | uid, now_ms, sale_opens_ms, rand_score, rejoin(0/1), max_rejoins | `q:init` missing → NOT_INIT (the API restores, then retries once; ADR 0009). T0 = `q:opens` if set, else ARGV. If now ≥ open and presize unset → freeze. An existing pre entry is resolved to its lottery ticket once frozen. Existing entry and not a rejoin → return it. Sold out → SOLD_OUT. Rejoin: honoured only after OFFER_EXPIRED (ticket ≤ cursor, offer gone or past its deadline, user not active), else the current entry is returned; past max_rejoins → REJOIN_LIMIT. Pre path (only while presize is **unset**): ZADD pre NX. Post path: ticket = presize + INCR tail (ADR 0008) | `PRE` \| `TICKET n` \| `SOLD_OUT` \| `REJOIN_LIMIT` \| `NOT_INIT` |
 | `queue_resolve.lua` | uid | ZRANK pre uid + 1 → store it as the user's ticket (idempotent). presize unset → PENDING | `TICKET n` \| `PENDING` \| `NOT_FOUND` |
 | `queue_claim.lua` | ticket, uid, now_ms, admission_ttl_ms, idle_ttl_ms | Sold out → SOLD_OUT. uid already active → ADMITTED with its `q:cap` (the lease expiry if `q:cap` was lost to a flush; idempotent). ticket > cursor → WAITING. Offer missing or expired → OFFER_EXPIRED. Otherwise ZREM offers, ZADD active `min(now + idle, cap)`, ZADD cap `now + admission_ttl` | `ADMITTED cap new(1\|0)` \| `OFFER_EXPIRED` \| `SOLD_OUT` \| `WAITING` |
-| `queue_touch.lua` | uid, now_ms, idle_ttl_ms, cap_ms (the token's exp) | `ZADD active XX GT CH min(now + idle, cap) uid`: renews a live admission's lease, never re-creates one, never shortens one, never passes the cap (ADR 0010 addendum) | `OK renewed(1\|0)` |
+| `queue_touch.lua` | KEYS active, init; uid, now_ms, idle_ttl_ms, cap_ms (the token's exp) | Reports the lease state and renews a live lease. `UNKNOWN` if `init` is missing (Redis lost the queue state). `LAPSED` if uid is not in `active` or its score is ≤ now (never renewed). Otherwise `LIVE` and `ZADD active XX GT CH min(now + idle, cap) uid` (never re-creates, never shortens, never passes the cap). `POST /holds` and `POST /orders` refuse `LAPSED` with 403 `ADMISSION_EXPIRED` (ADR 0010 addendum parts 2–3) | `OK renewed(1\|0) LIVE\|LAPSED\|UNKNOWN` |
 | `queue_leave.lua` | uid, ticket (0 = none) | ZREM active; DEL user entry; ZREM offers ticket; before the freeze also ZREM pre uid | `OK` |
 | `queue_tick.lua` | now_ms, sale_opens_ms, max_active, overadmit, min_admit, max_per_tick, offer_ttl_ms, rate_tau_ms | `meta.loaded` ≠ 1 → NOT_LOADED (never mistaken for sold out). `q:init` missing → NOT_INIT (the worker restores, then re-ticks). T0 = `q:opens` if set. Otherwise the algorithm in ARCHITECTURE §5 | `NOT_LOADED` \| `NOT_INIT` \| `PREQUEUE` \| `PAUSED` \| `SOLD_OUT` \| `ADMITTING k target seeking outstanding expired_offers` |
 | `queue_restore.lua` | now_ms, offer_ttl_ms, presize (−1 = unfrozen), tail, cursor, soldout, rate, n_offers, ticket..., n_active, (uid, exp_ms)... | If `q:init` exists → ALREADY. Else SET presize NX, tail/cursor = max(current, snapshot), soldout, rate; ZADD offers NX each ticket with deadline now + OFFER_CLAIM_TTL; ZADD active NX each still-live (uid, exp); SET `q:init` (ADR 0009) | `OK` \| `ALREADY` |

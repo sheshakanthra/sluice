@@ -1,0 +1,109 @@
+{
+  "event": "rush-1124-185604",
+  "event_id": "01a20dbd-055e-7842-a041-6e152580421c",
+  "mode": "normal",
+  "started_at": "2026-11-24T13:31:42.846914118Z",
+  "finished_at": "2026-11-24T13:32:02.417967214Z",
+  "settle": {
+    "seconds": 19.510731008,
+    "timed_out": false,
+    "polls": 21,
+    "reconcile": [
+      {
+        "orphans_fixed": 0,
+        "duplicates_fixed": 0,
+        "converged": 0,
+        "captures_requeued": 0,
+        "dead_holds_settled": 0,
+        "inventory_repaired": 0
+      },
+      {
+        "orphans_fixed": 0,
+        "duplicates_fixed": 0,
+        "converged": 0,
+        "captures_requeued": 0,
+        "dead_holds_settled": 0,
+        "inventory_repaired": 0
+      }
+    ],
+    "pending_at_end": {
+      "jobs": 0,
+      "expired_holds": 0,
+      "webhooks": 0,
+      "young_intents": 0
+    }
+  },
+  "checks": [
+    {
+      "name": "oversold",
+      "count": 0,
+      "pass": true,
+      "detail": {
+        "capacity": 500,
+        "excess_over_capacity": 0,
+        "issued": 500,
+        "seats_sold_more_than_once": 0,
+        "source": "tickets"
+      }
+    },
+    {
+      "name": "duplicate_charges",
+      "count": 0,
+      "pass": true,
+      "detail": {
+        "definition": "merchant_refs (orders) with more than 1 captured intent net of refunds",
+        "extra_charges": 0,
+        "refs_in_ledger": 383
+      }
+    },
+    {
+      "name": "orphan_charges",
+      "count": 0,
+      "pass": true,
+      "detail": {
+        "definition": "captured-not-refunded intents whose order is not CONFIRMED"
+      }
+    },
+    {
+      "name": "quota_violations",
+      "count": 0,
+      "pass": true,
+      "detail": {
+        "max_per_user": 4
+      }
+    },
+    {
+      "name": "stuck_holds",
+      "count": 0,
+      "pass": true,
+      "detail": {
+        "grace_s": 2
+      }
+    },
+    {
+      "name": "inventory_drift",
+      "count": 0,
+      "pass": true
+    },
+    {
+      "name": "ticket_order_consistency",
+      "count": 0,
+      "pass": true
+    },
+    {
+      "name": "admitted_after_soldout",
+      "count": 0,
+      "pass": true,
+      "detail": {
+        "admissions": 876
+      }
+    },
+    {
+      "name": "unresolved_users",
+      "count": 0,
+      "pass": true
+    }
+  ],
+  "passed": true,
+  "exit_code": 0
+}

@@ -114,9 +114,15 @@ type Options struct {
 	// CaptureAge: confirmed orders whose payment is AUTHORIZED for longer
 	// than this get their capture re-enqueued (60 s).
 	CaptureAge time.Duration
-	Now        func() time.Time
-	Log        *slog.Logger
-	Metrics    *Metrics
+	// NoPSPReconcile turns off the reconciler's PSP pass (refunding and
+	// voiding duplicate and orphan charges). Only the baselines set it
+	// (BASELINE naive or holds_only, rush/test; ADR 0011): they model a
+	// team without reconciliation, and leaving it on would quietly refund
+	// the duplicate charges the baseline exists to show.
+	NoPSPReconcile bool
+	Now            func() time.Time
+	Log            *slog.Logger
+	Metrics        *Metrics
 }
 
 // Service owns orders and payments.

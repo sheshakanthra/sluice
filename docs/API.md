@@ -9,7 +9,7 @@ Base path `/api/v1`. JSON throughout, UTF-8. Times are RFC 3339 UTC. Money is in
 |---|---|---|---|---|
 | Session | `session` | `sub` = user_id | 24 h | `POST /sessions` |
 | Queue | `queue` | `sub`, `eid`, `tkt` (0 = pre-queue) | until event start | `POST /events/{id}/queue`, refreshed by status |
-| Admission | `admission` | `sub`, `eid` | `ADMISSION_TTL` (hard cap; the server-side lease also ends after `ADMISSION_IDLE_TTL` without a request) | queue status, once ADMITTED |
+| Admission | `admission` | `sub`, `eid` | `ADMISSION_TTL` (hard cap; the server-side lease also ends after `ADMISSION_IDLE_TTL` without a request, or when the checkout ends; `POST /holds` and `POST /orders` then answer 403 `ADMISSION_EXPIRED`) | queue status, once ADMITTED |
 
 Send it as `Authorization: Bearer <token>`. Every token has `iss=sluice`, `iat`, `exp` and `jti`. The wrong audience or event gives 401 `TOKEN_INVALID`; an expired token gives 401 `TOKEN_EXPIRED`.
 
@@ -22,7 +22,7 @@ Send it as `Authorization: Bearer <token>`. Every token has `iss=sluice`, `iat`,
 - Same key while the first request is still in flight → `409 REQUEST_IN_PROGRESS` with `Retry-After: 1`.
 - A STARTED key past `locked_until` (a crash) becomes re-executable. Handlers must be safe to re-run, which is why hold IDs are deterministic and PSP keys are deterministic.
 - Keys are garbage-collected after 24 h. A missing key on an IK endpoint → `400 IDEMPOTENCY_KEY_REQUIRED`.
-- With `BASELINE=naive` or `holds_only` (rush/test only), payment endpoints skip this. That's the point of the baseline.
+- With `BASELINE=naive` or `holds_only` (rush/test only), payment endpoints skip this. That's the point of the baseline. The overridden routes (naive: hold, create, pay, new attempt, confirm, get; holds_only: pay) are mounted without the idempotency middleware; the real routes keep it (ADR 0011).
 
 ### 1.3 Errors: RFC 9457 `application/problem+json`
 ```json
@@ -36,6 +36,7 @@ Send it as `Authorization: Bearer <token>`. Every token has `iss=sluice`, `iat`,
 | `IDEMPOTENCY_KEY_REQUIRED` | 400 | IK endpoint without the header |
 | `TOKEN_INVALID` / `TOKEN_EXPIRED` | 401 | |
 | `NOT_ADMITTED` | 403 | Inventory endpoint without a valid admission token (when `QUEUE_ENFORCED`) |
+| `ADMISSION_EXPIRED` | 403 | `POST /holds` or `POST /orders` with a valid admission token whose server-side lease has ended (idle past `ADMISSION_IDLE_TTL`, checkout ended, left the queue, or past the cap). The client may rejoin (`POST /queue?rejoin=true`, two-rejoin limit). ADR 0010 addendum part 3 |
 | `NOT_FOUND` | 404 | |
 | `SEATS_TAKEN` | 409 | Some requested seats are unavailable (`taken[]`) |
 | `INSUFFICIENT_SEATS` | 409 | Fewer seats left than the quantity asked for (`available`) |
@@ -123,8 +124,8 @@ After T0 it returns `"state": "WAITING", "ticket_no": 41234`. Already sold out �
 `state` is one of `PREQUEUE | WAITING | PAUSED | ADMITTED | SOLD_OUT | OFFER_EXPIRED | CLOSED`.
 - `queue_token` is set when the server re-issues it: PREQUEUE → WAITING carries the resolved ticket. The client must replace its stored token.
 - `admission_token` and `admission_expires_at` are set only on ADMITTED. Both carry the admission's hard cap (`q:cap`: claim + `ADMISSION_TTL`), floored to the second, so repeated polls report the same value.
-- The admission is also a sliding lease: every request that presents the admission token renews it to `ADMISSION_IDLE_TTL` from now (never past the cap). An admitted user who makes no request for `ADMISSION_IDLE_TTL` loses the admission, and a later status poll answers `OFFER_EXPIRED` (ADR 0010 addendum). Clients that end without seats should still call `DELETE /queue` at once.
-- An admission ends early when the user's checkout ends: their order reaches CONFIRMED, FAILED or EXPIRED, or their hold is released or expires (ADR 0010 addendum). The admission token the user already has stays valid until its `exp`, so they can still hold again. A later status poll answers `OFFER_EXPIRED`, because the admission is no longer in `q:active` and the offer was used. A rejoin is then honoured (bounded by the two-rejoin limit and the per-user quota).
+- The admission is also a sliding lease: every request that presents the admission token renews it to `ADMISSION_IDLE_TTL` from now (never past the cap). An admitted user who makes no request for `ADMISSION_IDLE_TTL` loses the admission: `POST /holds` and `POST /orders` answer 403 `ADMISSION_EXPIRED`, and a later status poll answers `OFFER_EXPIRED` (ADR 0010 addendum). A lapsed lease is never renewed. Clients that end without seats should still call `DELETE /queue` at once.
+- An admission ends early when the user's checkout ends: their order reaches CONFIRMED, FAILED or EXPIRED, or their hold is released or expires (ADR 0010 addendum). The admission token still verifies until its `exp`, but it can no longer be spent: `POST /holds` and `POST /orders` check the lease in Redis (the same `queue_touch.lua` call that renews it, so no extra round trip) and answer 403 `ADMISSION_EXPIRED`. A later status poll answers `OFFER_EXPIRED`, because the admission is no longer in `q:active` and the offer was used. A rejoin is then honoured (bounded by the two-rejoin limit and the per-user quota). Other admission-token routes (`DELETE /holds/{id}`, `DELETE /queue`) still accept the token. If the check itself fails (Redis unreachable), the two routes answer 503 `DEPENDENCY_UNAVAILABLE`. If Redis lost the queue state (`q:init` missing, R1), the token alone decides until the queue is restored. Direct mode (`QUEUE_ENFORCED=false`) with a session token is not checked. `POST /test/admit` writes a lease the way a claim does.
 
 ### 3.4 `POST /events/{id}/holds` (IK) → 201
 Request, one of:

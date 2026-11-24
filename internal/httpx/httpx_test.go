@@ -49,6 +49,7 @@ func TestProblemCatalogue(t *testing.T) {
 		{CodeTokenInvalid, 401, "https://sluice.dev/errors/token-invalid"},
 		{CodeTokenExpired, 401, "https://sluice.dev/errors/token-expired"},
 		{CodeNotAdmitted, 403, "https://sluice.dev/errors/not-admitted"},
+		{CodeAdmissionExpired, 403, "https://sluice.dev/errors/admission-expired"},
 		{CodeNotFound, 404, "https://sluice.dev/errors/not-found"},
 		{CodeSeatsTaken, 409, "https://sluice.dev/errors/seats-taken"},
 		{CodeInsufficientSeats, 409, "https://sluice.dev/errors/insufficient-seats"},

@@ -71,15 +71,37 @@ type Keyring struct {
 	signer config.TokenKey
 	byID   map[string][]byte
 	now    func() time.Time
-	// touch, if set, runs on every request that Require lets through with a
-	// valid admission token (the queue's sliding admission lease).
-	touch func(context.Context, Claims)
+	// touch, if set, runs on every request that Require or RequireLive
+	// lets through with a valid admission token (the queue's sliding
+	// admission lease): it renews the lease and reports its state.
+	touch AdmissionCheck
 }
 
-// WithAdmissionTouch returns a copy of k whose Require calls f with the
-// claims of every request that presents a valid admission token, before
-// the handler runs. f must be quick and must not fail the request.
-func (k *Keyring) WithAdmissionTouch(f func(context.Context, Claims)) *Keyring {
+// AdmissionState is what the server-side admission lease check found
+// (ADR 0010 addendum part 3).
+type AdmissionState int
+
+// Admission lease states.
+const (
+	// AdmissionLive: the lease is live (and was renewed if it could be).
+	AdmissionLive AdmissionState = iota
+	// AdmissionLapsed: the admission ended (released, left, idle or past
+	// the cap). The token may still verify, but the admission is over.
+	AdmissionLapsed
+	// AdmissionUnknown: the queue state is not initialised in Redis (it was
+	// lost, R1), so only the token can decide until the queue is restored.
+	AdmissionUnknown
+	// AdmissionError: the check itself failed (Redis unreachable).
+	AdmissionError
+)
+
+// AdmissionCheck renews the admission lease of c and reports its state.
+type AdmissionCheck func(ctx context.Context, c Claims) AdmissionState
+
+// WithAdmissionTouch returns a copy of k whose Require and RequireLive call
+// f with the claims of every request that presents a valid admission token,
+// before the handler runs. f must be quick.
+func (k *Keyring) WithAdmissionTouch(f AdmissionCheck) *Keyring {
 	c := *k
 	c.touch = f
 	return &c

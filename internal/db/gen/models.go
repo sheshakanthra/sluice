@@ -389,6 +389,27 @@ type IdempotencyKey struct {
 	CreatedAt    time.Time
 }
 
+type NaiveOrder struct {
+	OrderRef    uuid.UUID
+	EventID     uuid.UUID
+	UserID      uuid.UUID
+	SeatNos     []int32
+	AmountPaise int64
+	Status      string
+	Attempts    int32
+	PayStatus   string
+	CreatedAt   time.Time
+}
+
+type NaiveSale struct {
+	ID       int64
+	EventID  uuid.UUID
+	SeatNo   int32
+	OrderRef uuid.UUID
+	UserID   uuid.UUID
+	SoldAt   time.Time
+}
+
 type Order struct {
 	ID          uuid.UUID
 	EventID     uuid.UUID

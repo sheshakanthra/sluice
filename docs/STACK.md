@@ -107,9 +107,9 @@ sluice/
 ├── deploy/
 │   ├── compose.yml            # infra: postgres, redis, prometheus, grafana
 │   ├── compose.app.yml        # migrate + seed one-shots, api1..3, worker, mockpay, caddy (+ web static volume)
-│   ├── compose.rush.yml       # swarm container (profile rush; sysctls, ulimits, results volume)
+│   ├── compose.rush.yml       # swarm + auditor containers (profile rush; sysctls, ulimits, results volume)
 │   ├── compose.chaos.yml      # toxiproxy wiring
-│   ├── env/                   # rush.env, demo.env.example (no real secrets)
+│   ├── env/                   # rush.env, demo.env.example, scenario overlays rush.b0/b1/b2.env (SLUICE_SCENARIO; no real secrets)
 │   ├── docker/Dockerfile      # multi-stage → distroless static image with the sluice binary
 │   ├── caddy/Caddyfile
 │   ├── postgres/init/01-mockpay-db.sql

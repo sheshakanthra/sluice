@@ -46,7 +46,11 @@ func (s *Service) Reconcile(ctx context.Context) (ReconcileResult, error) {
 		errs []error
 	)
 	now := s.o.Now()
-	for _, st := range []string{payments.StatusAuthorized, payments.StatusCaptured} {
+	pspStates := []string{payments.StatusAuthorized, payments.StatusCaptured}
+	if s.o.NoPSPReconcile {
+		pspStates = nil // baseline only (Options.NoPSPReconcile)
+	}
+	for _, st := range pspStates {
 		ins, err := s.psp.ListIntents(ctx, payments.ListFilter{Status: st})
 		if err != nil {
 			errs = append(errs, fmt.Errorf("list %s intents: %w", st, err))

@@ -37,5 +37,7 @@ func newOrders(cfg *config.Config, log *slog.Logger, reg prometheus.Registerer, 
 	return orders.NewService(pg, inv, psp, ins, rdb, orders.Options{
 		PaymentHoldTTL: cfg.PaymentHoldTTL, ReturnURL: strings.TrimRight(cfg.PublicAppURL, "/") + "/order",
 		Log: log, Metrics: om,
+		// Baselines model a team without payment reconciliation (ADR 0011).
+		NoPSPReconcile: cfg.Baseline != config.BaselineOff,
 	})
 }

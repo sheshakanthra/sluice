@@ -42,7 +42,7 @@ func newAPI(t *testing.T, e *env) *api {
 			return uuid.Nil, false, nil //nolint:nilerr // unknown event is "not found" here
 		}
 		return ev.ID, true, nil
-	}, 10*time.Minute, log))
+	}, 10*time.Minute, nil, log))
 	inventory.RegisterRoutes(rt, inventory.HandlerDeps{
 		Svc: e.svc, Avail: e.svc.NewAvailabilityCache(0), Keys: kr,
 		Idem: httpx.NewIdempotency(e.q, auth.UserID, log, nil), QueueEnforced: true, AdminToken: adminToken, Log: log,

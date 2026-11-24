@@ -65,8 +65,22 @@ func WriteError(w http.ResponseWriter, r *http.Request, err error) {
 
 // Require wraps next so it only runs with a valid token of one of auds. A
 // missing token gives missingCode (TOKEN_INVALID, or NOT_ADMITTED on
-// inventory routes when the queue is enforced).
+// inventory routes when the queue is enforced). An admission token renews
+// its lease (best effort; the lease state does not change the answer).
 func (k *Keyring) Require(missingCode httpx.Code, next http.Handler, auds ...Audience) http.Handler {
+	return k.require(missingCode, next, false, auds)
+}
+
+// RequireLive is Require for the routes that spend an admission (POST
+// /holds, POST /orders): an admission token must also have a live
+// server-side lease. A lapsed lease gives 403 ADMISSION_EXPIRED (the
+// client may rejoin); a failed check gives 503 DEPENDENCY_UNAVAILABLE, so
+// the gate never fails open. Session tokens (direct mode) are not checked.
+func (k *Keyring) RequireLive(missingCode httpx.Code, next http.Handler, auds ...Audience) http.Handler {
+	return k.require(missingCode, next, true, auds)
+}
+
+func (k *Keyring) require(missingCode httpx.Code, next http.Handler, live bool, auds []Audience) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tok, err := Bearer(r)
 		if errors.Is(err, ErrNoToken) {
@@ -88,10 +102,29 @@ func (k *Keyring) Require(missingCode httpx.Code, next http.Handler, auds ...Aud
 			return
 		}
 		if c.Audience == AudAdmission && k.touch != nil {
-			k.touch(r.Context(), c)
+			st := k.touch(r.Context(), c)
+			if live && !gatePasses(w, r, st) {
+				return
+			}
 		}
 		next.ServeHTTP(w, r.WithContext(WithClaims(r.Context(), c)))
 	})
+}
+
+// gatePasses writes the refusal for a non-live admission and reports
+// whether the request may go on.
+func gatePasses(w http.ResponseWriter, r *http.Request, st AdmissionState) bool {
+	switch st {
+	case AdmissionLapsed:
+		httpx.WriteError(w, r, httpx.CodeAdmissionExpired,
+			"your admission lease has ended; rejoin the queue (POST /queue?rejoin=true)")
+		return false
+	case AdmissionError:
+		httpx.WriteProblem(w, r, httpx.NewProblem(httpx.CodeDependencyUnavailable, "").WithRetryAfter(time.Second))
+		return false
+	default: // AdmissionLive, AdmissionUnknown (Redis lost the queue state: the token decides, R1)
+		return true
+	}
 }
 
 // RequireAdmin checks `Authorization: Bearer <ADMIN_TOKEN>` in constant time.
@@ -151,10 +184,15 @@ type AdmitResponse struct {
 // EventResolver maps an event UUID or slug to its UUID (false if unknown).
 type EventResolver func(ctx context.Context, idOrSlug string) (uuid.UUID, bool, error)
 
+// AdmissionGrant writes the server-side lease for an admission issued
+// outside the queue (ADR 0010 addendum part 3).
+type AdmissionGrant func(ctx context.Context, eid, uid uuid.UUID, capAt time.Time) error
+
 // TestAdmitHandler issues admission tokens directly (APP_ENV rush/test with
 // TEST_ENDPOINTS_ENABLED only; the caller decides whether to mount it). It
-// lets holds be exercised before the queue exists.
-func (k *Keyring) TestAdmitHandler(resolve EventResolver, ttl time.Duration, log *slog.Logger) http.HandlerFunc {
+// lets holds be exercised before the queue exists. grant, if set, also
+// writes the admission's lease, so RequireLive routes accept the token.
+func (k *Keyring) TestAdmitHandler(resolve EventResolver, ttl time.Duration, grant AdmissionGrant, log *slog.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req AdmitRequest
 		dec := json.NewDecoder(io.LimitReader(r.Body, 4<<10))
@@ -178,6 +216,13 @@ func (k *Keyring) TestAdmitHandler(resolve EventResolver, ttl time.Duration, log
 			log.ErrorContext(r.Context(), "issue admission", slog.String("error", err.Error()))
 			httpx.WriteError(w, r, httpx.CodeInternal, "")
 			return
+		}
+		if grant != nil {
+			if err := grant(r.Context(), eid, req.UserID, c.ExpiresAt()); err != nil {
+				log.ErrorContext(r.Context(), "grant admission lease", slog.String("error", err.Error()))
+				httpx.WriteProblem(w, r, httpx.NewProblem(httpx.CodeDependencyUnavailable, "").WithRetryAfter(time.Second))
+				return
+			}
 		}
 		w.Header().Set("Cache-Control", "no-store")
 		httpx.WriteJSON(w, http.StatusOK, AdmitResponse{EventID: eid, UserID: req.UserID, AdmissionToken: tok, ExpiresAt: c.ExpiresAt()})

@@ -21,6 +21,7 @@ var schemaObjects = []string{
 	"idempotency_keys", "webhook_events", "queue_snapshots", "hold_fence_seq",
 	"seats_hold_idx", "holds_expiry_idx", "holds_one_active_per_user", "orders_user_idx",
 	"payments_one_live_per_order", "idempotency_gc_idx",
+	"naive_orders", "naive_sales", // 0003: baseline only (ADR 0011)
 }
 
 var schemaTypes = []string{"event_status", "seat_state", "hold_status", "order_status", "payment_status"}
@@ -42,7 +43,7 @@ func TestMigrationsUpDownUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("up: %v", err)
 	}
-	if !slices.Equal(res.GooseApplied, []int64{1, 2}) || res.GooseVersion != 2 || len(res.RiverApplied) == 0 {
+	if !slices.Equal(res.GooseApplied, []int64{1, 2, 3}) || res.GooseVersion != 3 || len(res.RiverApplied) == 0 {
 		t.Fatalf("first up: %+v", res)
 	}
 	assertSchema(t, pool, true)
@@ -52,7 +53,7 @@ func TestMigrationsUpDownUp(t *testing.T) {
 
 	// Running migrate twice is safe and does nothing.
 	res, err = m.Up(ctx)
-	if err != nil || len(res.GooseApplied) != 0 || len(res.RiverApplied) != 0 || res.GooseVersion != 2 {
+	if err != nil || len(res.GooseApplied) != 0 || len(res.RiverApplied) != 0 || res.GooseVersion != 3 {
 		t.Fatalf("second up: %+v, %v", res, err)
 	}
 
@@ -65,7 +66,7 @@ func TestMigrationsUpDownUp(t *testing.T) {
 	}
 
 	res, err = m.Up(ctx)
-	if err != nil || !slices.Equal(res.GooseApplied, []int64{1, 2}) {
+	if err != nil || !slices.Equal(res.GooseApplied, []int64{1, 2, 3}) {
 		t.Fatalf("up again: %+v, %v", res, err)
 	}
 	assertSchema(t, pool, true)
