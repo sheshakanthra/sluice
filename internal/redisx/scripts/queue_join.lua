@@ -1,8 +1,12 @@
 -- queue_join.lua: join an event's waiting room (DATA-MODEL §5).
 -- KEYS: 1 q:user:<uid>, 2 q:pre, 3 q:presize, 4 q:tail, 5 q:soldout,
---       6 q:cursor, 7 q:offers, 8 q:active
+--       6 q:cursor, 7 q:offers, 8 q:active, 9 q:init, 10 q:opens
 -- ARGV: uid, now_ms, sale_opens_ms, rand_score, rejoin (0|1), max_rejoins
--- Returns {'PRE'} | {'TICKET', n} | {'SOLD_OUT'} | {'REJOIN_LIMIT'}
+-- Returns {'PRE'} | {'TICKET', n} | {'SOLD_OUT'} | {'REJOIN_LIMIT'} | {'NOT_INIT'}
+--
+-- NOT_INIT: q:init is missing (a fresh event, or Redis lost its keys). The
+-- caller restores the queue counters from PG (queue_restore.lua) and retries;
+-- issuing tickets before that could reuse ticket numbers (R1, ADR 0009).
 --
 -- The user entry is "<pre|ticket>:<rejoins>". Joining is idempotent: an
 -- existing entry is returned as is (a pre entry is resolved to its lottery
@@ -15,11 +19,13 @@
 -- admitted. Otherwise the current entry is returned unchanged.
 local uid = ARGV[1]
 local now = tonumber(ARGV[2])
-local opens = tonumber(ARGV[3])
+-- q:opens (set by an admin re-time) beats the caller's possibly cached T0.
+local opens = tonumber(redis.call('GET', KEYS[10]) or ARGV[3])
 local score = ARGV[4]
 local rejoin = ARGV[5] == '1'
 local maxRejoins = tonumber(ARGV[6])
 
+if redis.call('EXISTS', KEYS[9]) == 0 then return {'NOT_INIT'} end
 if redis.call('EXISTS', KEYS[3]) == 0 and now >= opens then
   redis.call('SET', KEYS[3], redis.call('ZCARD', KEYS[2]))
 end

@@ -1,10 +1,10 @@
 -- queue_tick.lua: one admission-controller step (ARCHITECTURE §5).
 -- KEYS: 1 meta, 2 avail, 3 holds, 4 holding, 5 q:pre, 6 q:presize, 7 q:tail,
 --       8 q:cursor, 9 q:offers, 10 q:active, 11 q:soldout, 12 q:rate,
---       13 q:rate_at
+--       13 q:rate_at, 14 q:init, 15 q:opens
 -- ARGV: now_ms, sale_opens_ms, max_active, overadmit, min_admit,
 --       max_per_tick, offer_ttl_ms, rate_tau_ms
--- Returns {'NOT_LOADED'} | {'PREQUEUE'} | {'SOLD_OUT'} | {'PAUSED'} |
+-- Returns {'NOT_INIT'} | {'NOT_LOADED'} | {'PREQUEUE'} | {'SOLD_OUT'} | {'PAUSED'} |
 --         {'ADMITTING', k, target, seeking, outstanding, expired_offers}
 --
 -- Atomic, so any number of controllers can run it concurrently: offers go
@@ -14,7 +14,8 @@
 -- inventory loaded, avail and holds both read 0, which must not be taken
 -- for "sold out".
 local now = tonumber(ARGV[1])
-local opens = tonumber(ARGV[2])
+-- q:opens (set by an admin re-time) beats the caller's possibly cached T0.
+local opens = tonumber(redis.call('GET', KEYS[15]) or ARGV[2])
 local maxActive = tonumber(ARGV[3])
 local overadmit = tonumber(ARGV[4])
 local minAdmit = tonumber(ARGV[5])
@@ -23,6 +24,7 @@ local offerTTL = tonumber(ARGV[7])
 local tau = tonumber(ARGV[8])
 
 if redis.call('HGET', KEYS[1], 'loaded') ~= '1' then return {'NOT_LOADED'} end
+if redis.call('EXISTS', KEYS[14]) == 0 then return {'NOT_INIT'} end -- restore first (R1)
 if redis.call('EXISTS', KEYS[6]) == 0 then
   if now < opens then return {'PREQUEUE'} end
   redis.call('SET', KEYS[6], redis.call('ZCARD', KEYS[5]))

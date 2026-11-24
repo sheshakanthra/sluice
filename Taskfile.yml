@@ -97,7 +97,11 @@ tasks:
   test:
     desc: All Go tests (integration tests need Docker running)
     cmds:
-      - go test ./...
+      # -p 2: at most two test binaries (each with its own PG/Redis
+      # containers) at once; Docker Desktop on Windows flakes when every
+      # package starts containers together. -timeout 20m: internal/orders
+      # runs ~4-5 min (its rapid property test alone ~3-4 min).
+      - go test -p 2 -timeout 20m {{.CLI_ARGS}} ./...
 
   test:short:
     desc: Unit tests only (skips testcontainers integration tests)
@@ -109,7 +113,7 @@ tasks:
     env:
       CGO_ENABLED: "1"
     cmds:
-      - go test -race ./...
+      - go test -race -p 2 -timeout 20m {{.CLI_ARGS}} ./...
 
   vuln:
     desc: govulncheck

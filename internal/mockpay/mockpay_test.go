@@ -322,9 +322,12 @@ func TestLedgerAppendOnly(t *testing.T) {
 
 // timeout_after_commit: the state change commits, then the response hangs
 // past the caller's timeout. A retry with the same key answers at once
-// with the committed result.
+// with the committed result. The hang is 3 s here and the replay must take
+// under a third of it: a replay that waited for the hang fails, while a
+// replay slowed by a loaded -race run (it once took >200 ms) does not.
 func TestTimeoutAfterCommit(t *testing.T) {
-	e := newEnv(t, nil)
+	const hang = 3 * time.Second
+	e := newEnv(t, func(o *mockpay.Options) { o.Hang = hang })
 	in := e.create("tac:1", "ref-tac")
 	short, err := payments.NewClient(payments.Options{BaseURL: e.http.URL, APIKey: key, Timeout: 200 * time.Millisecond, MaxRetries: -1})
 	if err != nil {
@@ -338,13 +341,17 @@ func TestTimeoutAfterCommit(t *testing.T) {
 	if err != nil || got.Status != payments.StatusAuthorized {
 		t.Fatalf("after the timeout: %s %v (the authorization must have committed)", got.Status, err)
 	}
+	patient, err := payments.NewClient(payments.Options{BaseURL: e.http.URL, APIKey: key, Timeout: 2 * time.Second, MaxRetries: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
 	start := time.Now()
-	again, err := short.Confirm(e.ctx, in.ID, payments.MethodTimeout)
+	again, err := patient.Confirm(e.ctx, in.ID, payments.MethodTimeout)
 	if err != nil || again.Status != payments.StatusAuthorized {
 		t.Fatalf("retry: %+v %v", again, err)
 	}
-	if d := time.Since(start); d > 150*time.Millisecond {
-		t.Fatalf("replay took %s; replays must not hang", d)
+	if d := time.Since(start); d > hang/3 {
+		t.Fatalf("replay took %s (hang %s); replays must not hang", d, hang)
 	}
 	if l := e.ledger(in.ID); l["AUTH"] != 1 {
 		t.Fatalf("ledger %v", l)

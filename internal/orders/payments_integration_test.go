@@ -53,8 +53,14 @@ func TestHappyPath(t *testing.T) {
 	h.eventually(5*time.Second, "capture", func() bool {
 		return h.payment(v.OrderID, 1).Status == gen.PaymentStatusCAPTURED
 	})
-	h.eventually(5*time.Second, "both webhooks processed", func() bool {
-		return h.counter("webhooks_total", "result", orders.WebhookProcessed) >= 2
+	// Both webhooks must be handled. Under load the dispatcher can deliver
+	// intent.authorized after the pay call already moved the payment to
+	// CAPTURED; that one is then (correctly) a regression_ignored, so count
+	// it as handled. The captured webhook is always processed.
+	h.eventually(5*time.Second, "both webhooks handled", func() bool {
+		return h.counter("webhooks_total", "result", orders.WebhookProcessed) >= 1 &&
+			h.counter("webhooks_total", "result", orders.WebhookProcessed)+
+				h.counter("webhooks_total", "result", orders.WebhookRegressionIgnored) >= 2
 	})
 	if l := h.ledger(intent); l["AUTH"] != 1 || l["CAPTURE"] != 1 || l["VOID"] != 0 || l["REFUND"] != 0 {
 		t.Fatalf("ledger %v", l)

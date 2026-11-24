@@ -14,8 +14,14 @@ const RouteUnmatched = "unmatched"
 // records the matched pattern so metrics use a bounded route label instead of
 // raw paths. Unmatched requests get a problem+json 404.
 type Router struct {
-	mux *http.ServeMux
+	mux  *http.ServeMux
+	wrap func(pattern string, h http.Handler) http.Handler
 }
+
+// Wrap installs a per-route decorator (rate limits, for instance). It
+// applies to routes registered after the call; the decorator sees the
+// pattern and returns h itself for routes it leaves alone.
+func (rt *Router) Wrap(fn func(pattern string, h http.Handler) http.Handler) { rt.wrap = fn }
 
 // NewRouter returns an empty router whose fallback is a NOT_FOUND problem.
 func NewRouter() *Router {
@@ -28,6 +34,9 @@ func NewRouter() *Router {
 
 // Handle registers h for pattern.
 func (rt *Router) Handle(pattern string, h http.Handler) {
+	if rt.wrap != nil {
+		h = rt.wrap(pattern, h)
+	}
 	rt.mux.Handle(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		setRoute(r.Context(), pattern)
 		h.ServeHTTP(w, r)

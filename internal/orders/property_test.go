@@ -192,7 +192,8 @@ func (c *propCase) settle() {
 // one ledger capture per order, and every captured intent belongs to a
 // CONFIRMED order or was refunded.
 func TestPaymentsProperty(t *testing.T) {
-	h := newHarness(t, withCapacity(4))
+	// ~3-4 min under -race (100 rapid cases); 4 min was too tight.
+	h := newHarness(t, withCapacity(4), withTimeout(12*time.Minute))
 	tally := map[string]int{}
 	defer func() { t.Logf("outcomes over all cases: %v", tally) }()
 	rapid.Check(t, func(rt *rapid.T) {

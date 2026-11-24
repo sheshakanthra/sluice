@@ -18,6 +18,7 @@ import (
 	"github.com/sheshakanthra/sluice/internal/config"
 	"github.com/sheshakanthra/sluice/internal/db"
 	"github.com/sheshakanthra/sluice/internal/obs"
+	"github.com/sheshakanthra/sluice/internal/testutil/tcretry"
 )
 
 // Images must match deploy/compose.yml.
@@ -36,21 +37,35 @@ func TestReadyzAgainstRealDependencies(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	pgC, err := tcpostgres.Run(ctx, postgresImage,
-		tcpostgres.WithDatabase("sluice"),
-		tcpostgres.WithUsername("sluice"),
-		tcpostgres.WithPassword("sluice"),
-		tcpostgres.BasicWaitStrategies(),
-	)
+	// Own containers (this test stops Redis), started through tcretry like
+	// pgtest/redistest: 3 attempts with backoff, then "infra: ...".
+	pgC, err := tcretry.Start(ctx, "postgres "+postgresImage, func(ctx context.Context) (*tcpostgres.PostgresContainer, error) {
+		return tcpostgres.Run(ctx, postgresImage,
+			tcpostgres.WithDatabase("sluice"),
+			tcpostgres.WithUsername("sluice"),
+			tcpostgres.WithPassword("sluice"),
+			tcpostgres.BasicWaitStrategies(),
+		)
+	}, func(c *tcpostgres.PostgresContainer) {
+		if c != nil {
+			_ = testcontainers.TerminateContainer(c)
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	testcontainers.CleanupContainer(t, pgC)
+	redisC, err := tcretry.Start(ctx, "redis "+redisImage, func(ctx context.Context) (*tcredis.RedisContainer, error) {
+		return tcredis.Run(ctx, redisImage)
+	}, func(c *tcredis.RedisContainer) {
+		if c != nil {
+			_ = testcontainers.TerminateContainer(c)
+		}
+	})
 	if err != nil {
-		t.Fatalf("start postgres: %v", err)
+		t.Fatal(err)
 	}
-	redisC, err := tcredis.Run(ctx, redisImage)
 	testcontainers.CleanupContainer(t, redisC)
-	if err != nil {
-		t.Fatalf("start redis: %v", err)
-	}
 
 	pgURL, err := pgC.ConnectionString(ctx, "sslmode=disable")
 	if err != nil {

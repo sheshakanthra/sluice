@@ -469,11 +469,9 @@ func TestSnapshot(t *testing.T) {
 	f.load(10, []int{0, 1}, 0)
 	f.holdSeats(uuid.New(), uuid.New(), 5)
 	e := f.eid
-	ks := []string{keys.QCursor(e), keys.QPreSize(e), keys.QTail(e), keys.QSoldOut(e), keys.Avail(e), keys.Holds(e),
-		keys.Sold(e), keys.Ver(e), keys.QRate(e), keys.QOffers(e), keys.QActive(e)}
-	r := f.run(redisx.Snapshot, ks)
+	r := f.run(redisx.Snapshot, keys.SnapshotKeys(e))
 	got := append([]string{r.Status}, r.Fields...)
-	want := []string{"0", "0", "0", "0", "7", "1", "2", strconv.FormatInt(nowMS+1, 10), "0", "0", "0"}
+	want := []string{"0", "0", "0", "0", "7", "1", "2", strconv.FormatInt(nowMS+1, 10), "0", "0", "0", "0"}
 	if !slices.Equal(got, want) {
 		t.Errorf("snapshot = %v, want %v", got, want)
 	}

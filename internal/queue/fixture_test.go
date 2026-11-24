@@ -102,6 +102,10 @@ type env struct {
 	router http.Handler
 	ev     queue.Event
 	cfg    envConfig
+
+	restorer *queue.Restorer
+	snapper  *queue.Snapshotter
+	wm       *queue.WorkerMetrics
 }
 
 func mustNil(t testing.TB, err error) {
@@ -148,12 +152,20 @@ func newEnv(t *testing.T, opts ...envOpt) *env {
 
 	qm, err := queue.NewMetrics(reg)
 	mustNil(t, err)
+	e.wm, err = queue.NewWorkerMetrics(reg)
+	mustNil(t, err)
+	e.restorer, err = queue.NewRestorer(e.q, sc, cfg.tick.OfferTTL, clk.Now, nil)
+	mustNil(t, err)
+	e.snapper, err = queue.NewSnapshotter(e.q, sc, clk.Now, nil, e.wm)
+	mustNil(t, err)
 	e.svc, err = queue.NewService(sc, kr, queue.NewCache(sc, clk.Now, nil), queue.Options{
 		AdmissionTTL: 10 * time.Minute, Overadmit: cfg.tick.Overadmit, Now: clk.Now, Metrics: qm,
+		Restorer: e.restorer,
 	})
 	mustNil(t, err)
 	ticker, err := queue.NewTicker(sc, cfg.tick)
 	mustNil(t, err)
+	ticker.WithRestorer(e.restorer, e.wm)
 	copt := queue.ControllerOptions{Tick: 10 * time.Millisecond, Refresh: 50 * time.Millisecond, Now: clk.Now}
 	if cfg.realClock {
 		copt.Now = nil
@@ -271,6 +283,7 @@ func (e *env) newController() *queue.Controller {
 	e.t.Helper()
 	ticker, err := queue.NewTicker(e.sc, e.cfg.tick)
 	mustNil(e.t, err)
+	ticker.WithRestorer(e.restorer, e.wm)
 	opt := queue.ControllerOptions{Tick: 10 * time.Millisecond, Refresh: 50 * time.Millisecond, Now: e.clk.Now}
 	if e.cfg.realClock {
 		opt.Now = nil

@@ -32,6 +32,7 @@ type Snapshot struct {
 	Rate    float64 // admit_rate_ema, admissions per second
 	Offers  int64   // outstanding offers
 	Active  int64   // admitted users
+	Pre     int64   // lottery entries (q:pre)
 	At      time.Time
 }
 
@@ -116,8 +117,8 @@ func (c *Cache) Run(ctx context.Context, interval time.Duration) error {
 }
 
 func parseSnapshot(v []string, at time.Time) (*Snapshot, error) {
-	if len(v) != 11 {
-		return nil, fmt.Errorf("queue: snapshot has %d fields, want 11", len(v))
+	if len(v) != 12 {
+		return nil, fmt.Errorf("queue: snapshot has %d fields, want 12", len(v))
 	}
 	n := make([]int64, len(v))
 	for i, s := range v {
@@ -136,6 +137,6 @@ func parseSnapshot(v []string, at time.Time) (*Snapshot, error) {
 	}
 	return &Snapshot{
 		Cursor: n[0], PreSize: n[1], Tail: n[2], SoldOut: n[3] == 1, Avail: n[4], Holds: n[5],
-		Sold: n[6], Ver: n[7], Rate: rate, Offers: n[9], Active: n[10], At: at,
+		Sold: n[6], Ver: n[7], Rate: rate, Offers: n[9], Active: n[10], Pre: n[11], At: at,
 	}, nil
 }

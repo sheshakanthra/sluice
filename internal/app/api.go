@@ -72,6 +72,13 @@ func APIHandler(ctx context.Context, d Deps) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
+	if d.Config.RateLimitsEnabled {
+		wrap, err := rateLimits(d, keyring)
+		if err != nil {
+			return nil, err
+		}
+		rt.Wrap(wrap) // every route registered below gets its API.md §2 limit
+	}
 	sc, err := newScripts(ctx, d.Log, d.Registry, d.Redis)
 	if err != nil {
 		return nil, err
@@ -123,13 +130,25 @@ func APIHandler(ctx context.Context, d Deps) (http.Handler, error) {
 		Idem:          idem,
 		QueueEnforced: d.Config.QueueEnforced, AdminToken: d.Config.AdminToken, Log: d.Log,
 	})
-	qsvc, err := newQueueService(d.Config, d.Log, d.Registry, sc, keyring)
+	restorer, err := newQueueRestorer(d.Config, d.Log, q, sc)
+	if err != nil {
+		return nil, err
+	}
+	qsvc, err := newQueueService(d.Config, d.Log, d.Registry, sc, keyring, restorer)
 	if err != nil {
 		return nil, err
 	}
 	// The snapshot refresher lives as long as the process context.
 	go func() { _ = qsvc.Cache().Run(ctx, queueSnapshotInterval) }()
 	queue.RegisterRoutes(rt, queue.HandlerDeps{Svc: qsvc, Events: inv, Keys: keyring, Log: d.Log})
+	stats, err := queue.NewStatsService(queue.StatsDeps{
+		Q: q, Cache: qsvc.Cache(), Events: inv, Counts: avail, Redis: d.Redis, Scripts: sc, Restorer: restorer,
+		AdminToken: d.Config.AdminToken, Log: d.Log,
+	})
+	if err != nil {
+		return nil, err
+	}
+	queue.RegisterStatsRoutes(rt, stats)
 	orders.RegisterRoutes(rt, orders.HandlerDeps{
 		Svc: ord, Keys: keyring, Idem: idem, QueueEnforced: d.Config.QueueEnforced,
 		AdminToken: d.Config.AdminToken, WebhookSecret: d.Config.MockpayWebhookSecret, Log: d.Log,

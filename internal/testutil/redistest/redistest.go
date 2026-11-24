@@ -16,6 +16,8 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/testcontainers/testcontainers-go"
 	tcredis "github.com/testcontainers/testcontainers-go/modules/redis"
+
+	"github.com/sheshakanthra/sluice/internal/testutil/tcretry"
 )
 
 // Image must match deploy/compose.yml.
@@ -28,15 +30,20 @@ type Server struct {
 }
 
 // Start launches the container.
+// A failed start is retried (tcretry: 3 attempts with backoff); the final
+// error begins "infra: container failed to start".
 func Start(ctx context.Context) (*Server, error) {
-	c, err := tcredis.Run(ctx, Image,
-		testcontainers.WithCmd("redis-server", "--appendonly", "yes", "--appendfsync", "everysec",
-			"--maxmemory-policy", "noeviction"))
-	if err != nil {
+	c, err := tcretry.Start(ctx, "redis "+Image, func(ctx context.Context) (*tcredis.RedisContainer, error) {
+		return tcredis.Run(ctx, Image,
+			testcontainers.WithCmd("redis-server", "--appendonly", "yes", "--appendfsync", "everysec",
+				"--maxmemory-policy", "noeviction"))
+	}, func(c *tcredis.RedisContainer) {
 		if c != nil {
 			_ = testcontainers.TerminateContainer(c)
 		}
-		return nil, fmt.Errorf("start redis: %w", err)
+	})
+	if err != nil {
+		return nil, err
 	}
 	url, err := c.ConnectionString(ctx)
 	if err != nil {

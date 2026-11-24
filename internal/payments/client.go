@@ -21,9 +21,16 @@ import (
 const (
 	DefaultTimeout    = 2 * time.Second
 	DefaultMaxRetries = 3
-	retryBase         = 50 * time.Millisecond
-	retryCap          = 500 * time.Millisecond
-	maxResponseBody   = 1 << 20
+	// MaxConnsPerHost bounds the PSP connections one process opens. Without
+	// it a burst of order creates dials one connection per call; on a busy
+	// host the PSP's accept queue overflows, refused dials are retried, and
+	// the retries keep it overflowing (seen in P4b's 200-goroutine order
+	// test: ~9k refused dials over 45 s). Calls beyond the bound wait for a
+	// free connection inside their own per-attempt timeout.
+	MaxConnsPerHost = 64
+	retryBase       = 50 * time.Millisecond
+	retryCap        = 500 * time.Millisecond
+	maxResponseBody = 1 << 20
 )
 
 // PSP operations (psp_requests_total{op}).
@@ -101,7 +108,8 @@ type Options struct {
 	Timeout time.Duration
 	// MaxRetries after the first attempt (default 3).
 	MaxRetries int
-	// Transport overrides the HTTP transport (tests inject faults here).
+	// Transport overrides the HTTP transport. Tests wrap NewTransport with
+	// fault injection, so they run on the production connection pool.
 	Transport http.RoundTripper
 	Metrics   *Metrics
 }
@@ -116,6 +124,23 @@ type Client struct {
 	retries int
 	http    *http.Client
 	metrics *Metrics
+}
+
+// NewTransport is the client's HTTP transport: a keep-alive pool of up to
+// MaxConnsPerHost connections per PSP host, all kept idle between calls.
+// dialTimeout <= 0 means DefaultTimeout.
+func NewTransport(dialTimeout time.Duration) *http.Transport {
+	if dialTimeout <= 0 {
+		dialTimeout = DefaultTimeout
+	}
+	return &http.Transport{
+		Proxy:               http.ProxyFromEnvironment,
+		DialContext:         (&net.Dialer{Timeout: dialTimeout}).DialContext,
+		MaxConnsPerHost:     MaxConnsPerHost,
+		MaxIdleConns:        MaxConnsPerHost,
+		MaxIdleConnsPerHost: MaxConnsPerHost,
+		IdleConnTimeout:     90 * time.Second,
+	}
 }
 
 // NewClient builds a Client.
@@ -134,13 +159,7 @@ func NewClient(o Options) (*Client, error) {
 	}
 	tr := o.Transport
 	if tr == nil {
-		tr = &http.Transport{
-			Proxy:               http.ProxyFromEnvironment,
-			DialContext:         (&net.Dialer{Timeout: o.Timeout}).DialContext,
-			MaxIdleConns:        256,
-			MaxIdleConnsPerHost: 256,
-			IdleConnTimeout:     90 * time.Second,
-		}
+		tr = NewTransport(o.Timeout)
 	}
 	return &Client{
 		base: strings.TrimRight(o.BaseURL, "/"), public: strings.TrimRight(o.PublicURL, "/"), apiKey: o.APIKey, timeout: o.Timeout, retries: o.MaxRetries,

@@ -160,7 +160,18 @@ CREATE TABLE queue_snapshots (                       -- R1: queue restore after 
 ```
 River creates its own tables (`river_job`, ...) through its migrator. `sluice migrate` runs goose first, then River.
 
-**`0002_naive_baseline.sql`** (P5, baseline only, deliberately unsafe):
+**`0002_queue_snapshot_state.sql`** (P4, ADR 0009): `queue_snapshots` also stores what was live when the snapshot was taken, so a restore re-creates exactly that:
+```sql
+ALTER TABLE queue_snapshots
+  ADD COLUMN admit_rate    double precision NOT NULL DEFAULT 0,
+  ADD COLUMN offers        bigint[] NOT NULL DEFAULT '{}',   -- outstanding offer tickets
+  ADD COLUMN active_uids   uuid[]   NOT NULL DEFAULT '{}',   -- admitted users ...
+  ADD COLUMN active_exp_ms bigint[] NOT NULL DEFAULT '{}',   -- ... and their expiries (same order)
+  ADD CONSTRAINT queue_snapshots_active_len CHECK (cardinality(active_uids) = cardinality(active_exp_ms));
+```
+`UpsertQueueSnapshot` only replaces a row whose `taken_at` is not newer, so a slow writer never regresses it.
+
+**`0003_naive_baseline.sql`** (P5, baseline only, deliberately unsafe; renumbered from 0002 by ADR 0009):
 ```sql
 -- DEMO ONLY: used when BASELINE=naive to reproduce oversells. No constraints by design.
 CREATE TABLE naive_sales (
@@ -290,9 +301,11 @@ Every per-event key carries the hash tag `{e:<eid>}`, so it's cluster-safe and L
 | `sl:{e:<eid>}:q:soldout` | STRING | `1` once sold out |
 | `sl:{e:<eid>}:q:rate` | STRING | admit_rate_ema in admissions/s, a time-decayed counter `rate·e^(−dt/τ) + k/τ`, τ = 5 s (written by tick) |
 | `sl:{e:<eid>}:q:rate_at` | STRING | ms timestamp of the last `q:rate` update |
+| `sl:{e:<eid>}:q:init` | STRING | `1` once the queue counters were initialised from `queue_snapshots` (zeros for a fresh event). `queue_join` / `queue_tick` answer `NOT_INIT` without it (ADR 0009) |
+| `sl:{e:<eid>}:q:opens` | STRING | T0 override in ms, set by admin open-sale; `queue_join` / `queue_tick` prefer it to the caller's cached `sale_opens_at` (ADR 0009) |
 | `sl:{e:<eid>}:audit` | HASH | live audit cache (oversold, dup, orphan, at_ms), written by the worker every 5 s |
 | `sl:{e:<eid>}:demo` | HASH | demo-rush metrics (bots, rps, p95s), demo mode only |
-| `sl:rl:*` | — | redis_rate GCRA keys |
+| `rate:sl:rl:<rule>:<ip or user>:<subject>` | — | redis_rate GCRA keys (the library prepends `rate:`) |
 
 Redis config: `appendonly yes`, `appendfsync everysec`, **`maxmemory-policy noeviction`** (a silent eviction would be data loss; writes must fail loudly instead).
 
@@ -309,17 +322,20 @@ Hold ids are deterministic: `hid = UUIDv5(NS_HOLD, user_id || ':' || idempotency
 | `hold_consume.lua` | hid | SADD sold seats; SREM avail seats; DEL hold; ZREM holds; SREM holding uid; INCR ver. If missing: ZREM holds only | `OK seats_csv` \| `MISSING` (idempotent) |
 | `hold_release.lua` | hid | If present (consumed holds are already deleted): SADD avail every seat not in `sold`; DEL; ZREM; SREM holding; INCR ver. If missing: ZREM holds only | `OK seats_csv` \| `MISSING` (idempotent) |
 | `inventory_repair.lua` | prefix, n, hid × n, then (seat, `A`\|`H`\|`S`)... | Forget n holds without touching avail (DEL hash, ZREM, SREM holding uid), then set each seat to PG's state: A → in avail; H → in neither set; S → in sold. INCR ver. Used after a compensation (seats PG says are taken) and after a PG takeover (ADR 0006) | `OK` |
-| `queue_join.lua` | uid, now_ms, sale_opens_ms, rand_score, rejoin(0/1), max_rejoins | If now ≥ open and presize unset → freeze. An existing pre entry is resolved to its lottery ticket once frozen. Existing entry and not a rejoin → return it. Sold out → SOLD_OUT. Rejoin: honoured only after OFFER_EXPIRED (ticket ≤ cursor, offer gone or past its deadline, user not active), else the current entry is returned; past max_rejoins → REJOIN_LIMIT. Pre path (only while presize is **unset**): ZADD pre NX. Post path: ticket = presize + INCR tail (ADR 0008) | `PRE` \| `TICKET n` \| `SOLD_OUT` \| `REJOIN_LIMIT` |
+| `queue_join.lua` | uid, now_ms, sale_opens_ms, rand_score, rejoin(0/1), max_rejoins | `q:init` missing → NOT_INIT (the API restores, then retries once; ADR 0009). T0 = `q:opens` if set, else ARGV. If now ≥ open and presize unset → freeze. An existing pre entry is resolved to its lottery ticket once frozen. Existing entry and not a rejoin → return it. Sold out → SOLD_OUT. Rejoin: honoured only after OFFER_EXPIRED (ticket ≤ cursor, offer gone or past its deadline, user not active), else the current entry is returned; past max_rejoins → REJOIN_LIMIT. Pre path (only while presize is **unset**): ZADD pre NX. Post path: ticket = presize + INCR tail (ADR 0008) | `PRE` \| `TICKET n` \| `SOLD_OUT` \| `REJOIN_LIMIT` \| `NOT_INIT` |
 | `queue_resolve.lua` | uid | ZRANK pre uid + 1 → store it as the user's ticket (idempotent). presize unset → PENDING | `TICKET n` \| `PENDING` \| `NOT_FOUND` |
-| `queue_claim.lua` | ticket, uid, now_ms, admission_ttl_ms | Sold out → SOLD_OUT. uid already active → ADMITTED (idempotent). ticket > cursor → WAITING. Offer missing or expired → OFFER_EXPIRED. Otherwise ZREM offers, ZADD active | `ADMITTED exp` \| `OFFER_EXPIRED` \| `SOLD_OUT` \| `WAITING` |
+| `queue_claim.lua` | ticket, uid, now_ms, admission_ttl_ms | Sold out → SOLD_OUT. uid already active → ADMITTED (idempotent). ticket > cursor → WAITING. Offer missing or expired → OFFER_EXPIRED. Otherwise ZREM offers, ZADD active | `ADMITTED exp new(1\|0)` \| `OFFER_EXPIRED` \| `SOLD_OUT` \| `WAITING` |
 | `queue_leave.lua` | uid, ticket (0 = none) | ZREM active; DEL user entry; ZREM offers ticket; before the freeze also ZREM pre uid | `OK` |
-| `queue_tick.lua` | now_ms, sale_opens_ms, max_active, overadmit, min_admit, max_per_tick, offer_ttl_ms, rate_tau_ms | `meta.loaded` ≠ 1 → NOT_LOADED (never mistaken for sold out). Otherwise the algorithm in ARCHITECTURE §5 | `NOT_LOADED` \| `PREQUEUE` \| `PAUSED` \| `SOLD_OUT` \| `ADMITTING k target seeking outstanding expired_offers` |
-| `snapshot.lua` | — | One read of cursor, presize, tail, soldout, SCARD avail, ZCARD holds, SCARD sold, ver, rate, ZCARD offers, ZCARD active | array |
+| `queue_tick.lua` | now_ms, sale_opens_ms, max_active, overadmit, min_admit, max_per_tick, offer_ttl_ms, rate_tau_ms | `meta.loaded` ≠ 1 → NOT_LOADED (never mistaken for sold out). `q:init` missing → NOT_INIT (the worker restores, then re-ticks). T0 = `q:opens` if set. Otherwise the algorithm in ARCHITECTURE §5 | `NOT_LOADED` \| `NOT_INIT` \| `PREQUEUE` \| `PAUSED` \| `SOLD_OUT` \| `ADMITTING k target seeking outstanding expired_offers` |
+| `queue_restore.lua` | now_ms, offer_ttl_ms, presize (−1 = unfrozen), tail, cursor, soldout, rate, n_offers, ticket..., n_active, (uid, exp_ms)... | If `q:init` exists → ALREADY. Else SET presize NX, tail/cursor = max(current, snapshot), soldout, rate; ZADD offers NX each ticket with deadline now + OFFER_CLAIM_TTL; ZADD active NX each still-live (uid, exp); SET `q:init` (ADR 0009) | `OK` \| `ALREADY` |
+| `queue_dump.lua` | — | One read for the snapshot writer: init, presize (−1), tail, cursor, soldout, rate, ZCARD pre, the offer tickets, the active (uid, exp) pairs | flat array |
+| `queue_reopen.lua` | sale_opens_ms | Admin open-sale. If anybody holds a ticket or lottery entry (presize + tail + ZCARD pre > 0) or sold out → BUSY. Else DEL presize, tail, cursor, offers, active, rate, rate_at; SET `q:init`; SET `q:opens` = new T0 | `OK` \| `BUSY joined` |
+| `snapshot.lua` | — | One read of cursor, presize, tail, soldout, SCARD avail, ZCARD holds, SCARD sold, ver, rate, ZCARD offers, ZCARD active, ZCARD pre | array |
 | `inventory_load.lua` | prefix, now_ms, fence_floor, capacity, max_per_user, sale_opens_ms, price, status, n_avail, avail..., n_sold, sold..., then per live hold: hid, uid, exp_ms, fence, state, seats_csv | Delete the old hold hashes, meta, avail, sold, holds and holding; SADD avail and sold (chunks of 5,000); recreate each hold hash, its ZADD and its holding entry; fence = max(current, fence_floor); ver = max(current + 1, now_ms); HSET meta last, with loaded=1 (used by rebuild) | `OK` |
 
 ## 6. Rebuild procedures (R1)
 - **Inventory rebuild** (`inventory.Service.Rebuild`; admin endpoint `POST /admin/events/{id}/rebuild-cache`, plus automatically through `EnsureLoaded` whenever `meta.loaded` is missing: the worker checks every open event on each sweeper tick, and a hold script that answers NOT_LOADED triggers it in the API). Steps: reclaim expired holds in PG first (the sweeper's PG pass). Then, in one REPEATABLE READ read-only snapshot, read `seats`, the live holds and `max(holds.fence)`. avail = AVAILABLE seats plus HELD seats whose `held_until` has passed (a hold takes those over in PG). sold = SOLD. Recreate the hold hashes, the `holds` ZSET and `holding` from live, unexpired PG holds, then run `inventory_load.lua`. `EnsureLoaded` takes `rebuild_lock` (SET NX, 30 s) so one process rebuilds at a time; the others answer 503 with `Retry-After: 1`. Throughout, PG wins. Tested by `TestRebuildAfterFlushAll`: 300 holds, `FLUSHALL`, rebuild, then Redis matches PG seat by seat and hold by hold.
-- **Queue restore:** from `queue_snapshots`, restore presize, tail, cursor and soldout. Users carry signed queue tokens (ticket inside), so positions survive. Tickets in `(cursor − OFFER_CLAIM_TTL × admit_rate, cursor]` get fresh offers. Users whose dedupe key was lost may rejoin, and their old token stays valid.
+- **Queue restore** (`queue.Restorer`, `queue_restore.lua`; ADR 0009). The worker's `Snapshotter` writes `queue_snapshots` every 1 s for every open event whose `q:init` is set (never for a flushed, unrestored queue, so a flush cannot overwrite a good snapshot with zeros). It stores presize, tail, cursor, soldout, admit_rate, the outstanding offer tickets and the live admissions. `queue_join` and `queue_tick` answer `NOT_INIT` while `q:init` is missing; the API join path and the worker's ticker then restore from the snapshot (zeros for a fresh event) and retry once. The restore runs once per Redis lifetime of an event (`q:init` gate). Users carry signed queue tokens (ticket inside), so positions survive exactly. Outstanding offers get a fresh claim deadline, and live admissions come back with their original expiry, so a user who had claimed is not admitted again. Offers made after the last snapshot (≤ 1 s) are simply re-offered as the cursor advances; a claim made after it can be repeated once by the same uid (still one entry in `active`; HOLD_LIMIT and the PG quota still bind). Users whose dedupe key (`q:user`) or lottery entry was lost may rejoin at the back, and their old token stays valid. Tested by `TestRestoreAfterFlushAll`.
 
 ## 7. Seed data (`sluice seed`, idempotent)
 | slug | Name (fictional) | Capacity | Layout | Price | Notes |

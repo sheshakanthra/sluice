@@ -134,3 +134,31 @@ func TestNewKeyringRejectsWeakKeys(t *testing.T) {
 		t.Error("short key accepted")
 	}
 }
+
+// TestIssueUntil: the expiry comes from the caller's absolute time, floored
+// to the second, whatever the clock reads when the token is issued; the
+// returned claims match what Verify reads back.
+func TestIssueUntil(t *testing.T) {
+	exp := time.Date(2026, 11, 23, 10, 5, 7, 850_000_000, time.UTC) // .85 s
+	want := time.Date(2026, 11, 23, 10, 5, 7, 0, time.UTC)
+	uid, eid := uuid.New(), uuid.New()
+	for _, now := range []time.Time{
+		time.Date(2026, 11, 23, 10, 0, 0, 100_000_000, time.UTC),
+		time.Date(2026, 11, 23, 10, 0, 0, 900_000_000, time.UTC),
+		time.Date(2026, 11, 23, 10, 4, 59, 999_000_000, time.UTC),
+	} {
+		c := &clock{t: now}
+		kr := ring(t, c, k1)
+		tok, claims, err := kr.IssueUntil(AudAdmission, uid, eid, nil, exp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := kr.Verify(tok, AudAdmission)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !claims.ExpiresAt().Equal(want) || !got.ExpiresAt().Equal(want) {
+			t.Errorf("now %v: claims exp %v, verified exp %v, want %v", now, claims.ExpiresAt(), got.ExpiresAt(), want)
+		}
+	}
+}

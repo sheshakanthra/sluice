@@ -75,7 +75,8 @@ func QRateAt(eid uuid.UUID) string { return k(eid, "q:rate_at") }
 
 // QueueJoinKeys are queue_join.lua's KEYS, in order.
 func QueueJoinKeys(eid, uid uuid.UUID) []string {
-	return []string{QUser(eid, uid), QPre(eid), QPreSize(eid), QTail(eid), QSoldOut(eid), QCursor(eid), QOffers(eid), QActive(eid)}
+	return []string{QUser(eid, uid), QPre(eid), QPreSize(eid), QTail(eid), QSoldOut(eid), QCursor(eid), QOffers(eid),
+		QActive(eid), QInit(eid), QOpens(eid)}
 }
 
 // QueueResolveKeys are queue_resolve.lua's KEYS, in order.
@@ -96,11 +97,41 @@ func QueueLeaveKeys(eid, uid uuid.UUID) []string {
 // QueueTickKeys are queue_tick.lua's KEYS, in order.
 func QueueTickKeys(eid uuid.UUID) []string {
 	return []string{Meta(eid), Avail(eid), Holds(eid), Holding(eid), QPre(eid), QPreSize(eid), QTail(eid),
-		QCursor(eid), QOffers(eid), QActive(eid), QSoldOut(eid), QRate(eid), QRateAt(eid)}
+		QCursor(eid), QOffers(eid), QActive(eid), QSoldOut(eid), QRate(eid), QRateAt(eid), QInit(eid), QOpens(eid)}
 }
 
 // SnapshotKeys are snapshot.lua's KEYS, in order.
 func SnapshotKeys(eid uuid.UUID) []string {
 	return []string{QCursor(eid), QPreSize(eid), QTail(eid), QSoldOut(eid), Avail(eid), Holds(eid),
-		Sold(eid), Ver(eid), QRate(eid), QOffers(eid), QActive(eid)}
+		Sold(eid), Ver(eid), QRate(eid), QOffers(eid), QActive(eid), QPre(eid)}
 }
+
+// QInit marks an event's queue counters as initialised from the PG snapshot
+// (R1, ADR 0009). queue_join and queue_tick refuse to run without it.
+func QInit(eid uuid.UUID) string { return k(eid, "q:init") }
+
+// QueueRestoreKeys are queue_restore.lua's KEYS, in order.
+func QueueRestoreKeys(eid uuid.UUID) []string {
+	return []string{QInit(eid), QPreSize(eid), QTail(eid), QCursor(eid), QSoldOut(eid), QOffers(eid), QActive(eid),
+		QRate(eid), QRateAt(eid)}
+}
+
+// QueueDumpKeys are queue_dump.lua's KEYS, in order.
+func QueueDumpKeys(eid uuid.UUID) []string {
+	return []string{QInit(eid), QPreSize(eid), QTail(eid), QCursor(eid), QSoldOut(eid), QRate(eid), QPre(eid),
+		QOffers(eid), QActive(eid)}
+}
+
+// RateLimitPrefix prefixes the GCRA keys. redis_rate adds its own "rate:"
+// prefix in front, so the stored keys are rate:sl:rl:<rule>:<subject>.
+const RateLimitPrefix = "sl:rl:"
+
+// QueueReopenKeys are queue_reopen.lua's KEYS, in order.
+func QueueReopenKeys(eid uuid.UUID) []string {
+	return []string{QInit(eid), QPreSize(eid), QTail(eid), QPre(eid), QSoldOut(eid), QCursor(eid), QOffers(eid),
+		QActive(eid), QRate(eid), QRateAt(eid), QOpens(eid)}
+}
+
+// QOpens is an admin override of T0 in ms (open-sale), read by queue_join and
+// queue_tick in preference to the caller's cached sale_opens_at.
+func QOpens(eid uuid.UUID) string { return k(eid, "q:opens") }

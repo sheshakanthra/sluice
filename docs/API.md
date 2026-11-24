@@ -43,6 +43,7 @@ Send it as `Authorization: Bearer <token>`. Every token has `iss=sluice`, `iat`,
 | `HOLD_LIMIT` | 409 | The user already has an active hold for this event |
 | `HOLD_EXPIRED` | 409 | The hold expired or was reclaimed |
 | `REJOIN_LIMIT` | 409 | `POST /queue?rejoin=true` after the 2 allowed rejoins (ADR 0008) |
+| `EVENT_STATE` | 409 | Admin open-sale on an event that sold out, closed, or whose queue already has entries (ADR 0009) |
 | `ORDER_STATE` | 409 | Action not allowed in the current order state |
 | `REQUEST_IN_PROGRESS` | 409 | Concurrent request with the same IK |
 | `QUOTA_EXCEEDED` | 422 | Would exceed `max_per_user` |
@@ -58,7 +59,7 @@ The client-observable outcomes of a rush (sold out, taken, rate-limited) are **n
 `{eventId}` accepts either the event UUID or its slug (for example `tatkal-chn-sbc`).
 
 ### 1.5 Other headers
-`X-Request-Id` comes back on every response (and is accepted from trusted proxies). `RateLimit-Policy` / `RateLimit` follow the IETF draft fields on limited routes. Availability uses `ETag`; `If-None-Match` returns 304.
+`X-Request-Id` comes back on every response (and is accepted from trusted proxies). `RateLimit-Policy` / `RateLimit` follow the IETF draft (draft-ietf-httpapi-ratelimit-headers) structured fields on limited routes, e.g. `RateLimit-Policy: "join-user";q=6;w=60` and `RateLimit: "join-user";r=5;t=10`; the most constrained rule of the route is reported. A 429 carries `Retry-After` in whole seconds. Availability uses `ETag`; `If-None-Match` returns 304.
 
 ## 2. Endpoints
 
@@ -85,12 +86,12 @@ The client-observable outcomes of a rush (sold out, taken, rate-limited) are **n
 | GET | `/api/v1/stats/{eventId}` | — | | Live stats for Rush Control (cached ≤ 1 s) |
 | POST | `/api/v1/admin/events/{eventId}/reset` | admin | | Reset the event (demo/test) |
 | POST | `/api/v1/admin/events/{eventId}/rebuild-cache` | admin | | Rebuild Redis from PG (R1) |
-| POST | `/api/v1/admin/events/{eventId}/open-sale` | admin | | `{ "opens_in_s": 30 }` sets T0 = now + N |
+| POST | `/api/v1/admin/events/{eventId}/open-sale` | admin | | `{ "opens_in_s": 0..86400 }` sets T0 = now + N and status SCHEDULED → 200 `{event_id, sale_opens_at, status}`. Only while nobody holds a ticket or lottery entry, else 409 `EVENT_STATE` (ADR 0009) |
 | POST | `/api/v1/admin/reconcile` | admin | | Run reconciliation now (the auditor's settle step), synchronously → 200 `{orphans_fixed, duplicates_fixed, converged, captures_requeued, dead_holds_settled, inventory_repaired}`; 503 if a step failed |
 | POST | `/api/v1/demo/rush` | — (rate-limited) | | Demo mode only: `{ "bots": 2000, "opens_in_s": 20 }` → 202 |
 | POST | `/api/v1/test/admit` | — | | Test/rush only: `{ "event_id", "user_id" }` → admission token |
 
-Per-route rate limits (when `RATE_LIMITS_ENABLED`): sessions 20/min/IP; join 6/min/user and 30/min/IP; status 3/s/user (burst 6, in-process); holds 20/min/user; orders, pay and confirm 10/min/user; demo rush 1 per 2 min globally.
+Per-route rate limits (when `RATE_LIMITS_ENABLED`): sessions 20/min/IP; join 6/min/user and 30/min/IP; status 3/s/user (burst 6, in-process); holds 20/min/user; orders, pay and confirm 10/min/user each (new payment attempts share the pay bucket); demo rush 1 per 2 min globally (P7). Redis GCRA (go-redis/redis_rate), shared by all replicas; burst = the per-minute count. The user is the verified token subject (any audience); a request without a valid token skips user rules and is then rejected by auth. The client IP is the peer, or, when the peer is in `TRUSTED_PROXIES`, the right-most `X-Forwarded-For` entry that is not a trusted proxy. If Redis fails the check, the request passes (fail open; `ratelimit_decisions_total{result="error"}`). The status limiter keeps at most 200,000 users per replica (sharded LRU). `POST /queue` answers 503 `DEPENDENCY_UNAVAILABLE` (Retry-After 1) if the queue counters cannot be restored (ADR 0009).
 
 ## 3. Key shapes
 
@@ -121,7 +122,7 @@ After T0 it returns `"state": "WAITING", "ticket_no": 41234`. Already sold out �
 ```
 `state` is one of `PREQUEUE | WAITING | PAUSED | ADMITTED | SOLD_OUT | OFFER_EXPIRED | CLOSED`.
 - `queue_token` is set when the server re-issues it: PREQUEUE → WAITING carries the resolved ticket. The client must replace its stored token.
-- `admission_token` and `admission_expires_at` are set only on ADMITTED.
+- `admission_token` and `admission_expires_at` are set only on ADMITTED. Both carry the admission's own expiry from `q:active`, floored to the second, so repeated polls (and a re-claim after a restore) report the same value.
 
 ### 3.4 `POST /events/{id}/holds` (IK) → 201
 Request, one of:
@@ -183,6 +184,7 @@ Each API replica serves this from an in-memory cache. It re-checks each event at
   "correctness": { "oversold": 0, "duplicate_charges": 0, "orphan_charges": 0, "checked_at": "..." },
   "demo_rush": { "running": false } }
 ```
+Each replica recomputes the body at most once per second per event (`Cache-Control: public, max-age=1`). `event_status` and `sale_opens_at` come from PG; `queue` from the replica's queue snapshot (≤ 1 s old): `joined` = presize + tail (before the freeze: lottery entries), `waiting` = joined − cursor (users who left are not subtracted); `inventory` from the live seat counts; `correctness` from the worker's `sl:{e}:audit` hash (refreshed every 5 s for ON_SALE events; all four fields `null` when there is none). `sold_out_at` is always `null` for now: no column records it (ADR 0009). `demo_rush` is fixed until demo mode lands (P7).
 
 ### 3.10 `GET /events` → 200
 ```json
@@ -243,4 +245,4 @@ MockPay semantics:
 - Intents carry `authorized: true|false` (the ledger has an `AUTH` entry), so a canceled intent tells whether money was ever held.
 - The ledger is append-only in the database (a trigger rejects UPDATE, DELETE and TRUNCATE).
 
-The SLUICE PSP client uses a **2 s** timeout per call, retries ≤ 3 with jittered backoff, and always the same deterministic key: `order:<order_id>:attempt:<n>` to create, `confirm:<intent_id>`, `capture:<intent_id>`, `void:<intent_id>`, `refund:<intent_id>`.
+The SLUICE PSP client uses a **2 s** timeout per call, retries ≤ 3 with jittered backoff, at most **64 connections per PSP host** per process (calls beyond that wait for a free connection within their timeout; ADR 0009), and always the same deterministic key: `order:<order_id>:attempt:<n>` to create, `confirm:<intent_id>`, `capture:<intent_id>`, `void:<intent_id>`, `refund:<intent_id>`.

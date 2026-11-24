@@ -174,7 +174,7 @@ queue_tick(now):
   update admit_rate_ema; return ADMITTING(k)          # ema: rate*e^(-dt/5s) + k/5s, per second
 ```
 The worker runs one tick loop per non-CLOSED event and moves the event's PG status SCHEDULED → ON_SALE on the first admitting/paused tick and → SOLD_OUT when the tick sets the flag (conditional update; ADR 0008).
-Every second the worker also writes `queue_snapshots`, used by R1.
+Every second the worker also writes `queue_snapshots` (counters plus the live offers and admissions), used by R1. `queue_join` and `queue_tick` refuse to run until `q:init` shows the counters were restored from that snapshot, so a wiped Redis can never reissue a ticket number or re-admit from cursor 0 (DATA-MODEL §6, ADR 0009).
 
 **Status math** (API, in memory):
 - `position = ticket − cursor`

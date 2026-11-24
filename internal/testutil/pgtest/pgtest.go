@@ -24,6 +24,7 @@ import (
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 
 	"github.com/sheshakanthra/sluice/internal/db"
+	"github.com/sheshakanthra/sluice/internal/testutil/tcretry"
 )
 
 // Image must match deploy/compose.yml.
@@ -67,18 +68,23 @@ func Main(m *testing.M, srv **Server) int {
 }
 
 // Start launches the container.
+// A failed start is retried (tcretry: 3 attempts with backoff); the final
+// error begins "infra: container failed to start".
 func Start(ctx context.Context) (*Server, error) {
-	c, err := tcpostgres.Run(ctx, Image,
-		tcpostgres.WithDatabase("postgres"),
-		tcpostgres.WithUsername("sluice"),
-		tcpostgres.WithPassword("sluice"),
-		tcpostgres.BasicWaitStrategies(),
-	)
-	if err != nil {
+	c, err := tcretry.Start(ctx, "postgres "+Image, func(ctx context.Context) (*tcpostgres.PostgresContainer, error) {
+		return tcpostgres.Run(ctx, Image,
+			tcpostgres.WithDatabase("postgres"),
+			tcpostgres.WithUsername("sluice"),
+			tcpostgres.WithPassword("sluice"),
+			tcpostgres.BasicWaitStrategies(),
+		)
+	}, func(c *tcpostgres.PostgresContainer) {
 		if c != nil {
 			_ = testcontainers.TerminateContainer(c)
 		}
-		return nil, fmt.Errorf("start postgres: %w", err)
+	})
+	if err != nil {
+		return nil, err
 	}
 	raw, err := c.ConnectionString(ctx, "sslmode=disable")
 	if err != nil {

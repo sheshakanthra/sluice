@@ -42,7 +42,7 @@ func TestMigrationsUpDownUp(t *testing.T) {
 	if err != nil {
 		t.Fatalf("up: %v", err)
 	}
-	if !slices.Equal(res.GooseApplied, []int64{1}) || res.GooseVersion != 1 || len(res.RiverApplied) == 0 {
+	if !slices.Equal(res.GooseApplied, []int64{1, 2}) || res.GooseVersion != 2 || len(res.RiverApplied) == 0 {
 		t.Fatalf("first up: %+v", res)
 	}
 	assertSchema(t, pool, true)
@@ -52,7 +52,7 @@ func TestMigrationsUpDownUp(t *testing.T) {
 
 	// Running migrate twice is safe and does nothing.
 	res, err = m.Up(ctx)
-	if err != nil || len(res.GooseApplied) != 0 || len(res.RiverApplied) != 0 || res.GooseVersion != 1 {
+	if err != nil || len(res.GooseApplied) != 0 || len(res.RiverApplied) != 0 || res.GooseVersion != 2 {
 		t.Fatalf("second up: %+v, %v", res, err)
 	}
 
@@ -65,7 +65,7 @@ func TestMigrationsUpDownUp(t *testing.T) {
 	}
 
 	res, err = m.Up(ctx)
-	if err != nil || !slices.Equal(res.GooseApplied, []int64{1}) {
+	if err != nil || !slices.Equal(res.GooseApplied, []int64{1, 2}) {
 		t.Fatalf("up again: %+v, %v", res, err)
 	}
 	assertSchema(t, pool, true)

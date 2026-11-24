@@ -23,6 +23,7 @@ const tickTimeout = time.Second
 // Tick outcomes (queue_tick.lua status words).
 const (
 	TickNotLoaded = "NOT_LOADED"
+	TickNotInit   = tickNotInit // queue counters missing: restore from PG first (R1)
 	TickPrequeue  = "PREQUEUE"
 	TickSoldOut   = "SOLD_OUT"
 	TickPaused    = "PAUSED"
@@ -51,8 +52,18 @@ type TickResult struct {
 // Ticker runs queue_tick.lua for one event. It has no state of its own, so
 // any number of tickers (in any number of workers) may run concurrently.
 type Ticker struct {
-	sc  *redisx.Scripts
-	cfg TickConfig
+	sc       *redisx.Scripts
+	cfg      TickConfig
+	restorer *Restorer
+	metrics  *WorkerMetrics
+}
+
+// WithRestorer makes Tick restore an event's queue counters from PG when
+// queue_tick reports them missing (R1), and count expired offers on m.
+// Either may be nil.
+func (t *Ticker) WithRestorer(r *Restorer, m *WorkerMetrics) *Ticker {
+	t.restorer, t.metrics = r, m
+	return t
 }
 
 // NewTicker validates cfg and builds a ticker.
@@ -65,6 +76,17 @@ func NewTicker(sc *redisx.Scripts, cfg TickConfig) (*Ticker, error) {
 
 // Tick runs one admission step for eid at now.
 func (t *Ticker) Tick(ctx context.Context, eid uuid.UUID, opens, now time.Time) (TickResult, error) {
+	res, err := t.tick(ctx, eid, opens, now)
+	if err != nil || res.State != TickNotInit || t.restorer == nil {
+		return res, err
+	}
+	if _, err := t.restorer.Restore(ctx, eid); err != nil {
+		return res, err
+	}
+	return t.tick(ctx, eid, opens, now)
+}
+
+func (t *Ticker) tick(ctx context.Context, eid uuid.UUID, opens, now time.Time) (TickResult, error) {
 	r, err := t.sc.Run(ctx, redisx.QueueTick, keys.QueueTickKeys(eid),
 		now.UnixMilli(), opens.UnixMilli(), t.cfg.MaxActive, strconv.FormatFloat(t.cfg.Overadmit, 'f', -1, 64),
 		t.cfg.MinAdmit, t.cfg.MaxPerTick, t.cfg.OfferTTL.Milliseconds(), rateTau.Milliseconds())
@@ -73,7 +95,7 @@ func (t *Ticker) Tick(ctx context.Context, eid uuid.UUID, opens, now time.Time) 
 	}
 	res := TickResult{State: r.Status}
 	switch r.Status {
-	case TickNotLoaded, TickPrequeue, TickSoldOut, TickPaused:
+	case TickNotLoaded, TickNotInit, TickPrequeue, TickSoldOut, TickPaused:
 		return res, nil
 	case TickAdmitting:
 		for i, dst := range []*int64{&res.Admitted, &res.Target, &res.Seeking, &res.Outstanding, &res.ExpiredOffers} {
@@ -81,6 +103,7 @@ func (t *Ticker) Tick(ctx context.Context, eid uuid.UUID, opens, now time.Time) 
 				return res, fmt.Errorf("queue: tick reply: %w", err)
 			}
 		}
+		t.metrics.expired(res.ExpiredOffers)
 		return res, nil
 	default:
 		return res, fmt.Errorf("queue: tick: unexpected reply %q", r.Status)

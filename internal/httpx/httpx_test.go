@@ -56,6 +56,7 @@ func TestProblemCatalogue(t *testing.T) {
 		{CodeHoldLimit, 409, "https://sluice.dev/errors/hold-limit"},
 		{CodeHoldExpired, 409, "https://sluice.dev/errors/hold-expired"},
 		{CodeRejoinLimit, 409, "https://sluice.dev/errors/rejoin-limit"},
+		{CodeEventState, 409, "https://sluice.dev/errors/event-state"},
 		{CodeOrderState, 409, "https://sluice.dev/errors/order-state"},
 		{CodeRequestInProgress, 409, "https://sluice.dev/errors/request-in-progress"},
 		{CodeQuotaExceeded, 422, "https://sluice.dev/errors/quota-exceeded"},

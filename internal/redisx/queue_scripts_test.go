@@ -36,6 +36,15 @@ func (f *fixture) claim(ticket int64, uid uuid.UUID, now int64) redisx.Reply {
 	return f.run(redisx.QueueClaim, keys.QueueClaimKeys(f.eid), ticket, uid.String(), now, 600_000)
 }
 
+// initQueue marks the queue counters restored (q:init), as the restorer
+// does for a fresh event; join and tick answer NOT_INIT until then.
+func (f *fixture) initQueue() {
+	f.t.Helper()
+	if r := reply(f.run(redisx.QueueRestore, keys.QueueRestoreKeys(f.eid), nowMS, 60_000, -1, 0, 0, 0, "0", 0, 0)); r != "[OK]" {
+		f.t.Fatalf("restore = %s", r)
+	}
+}
+
 func reply(r redisx.Reply) string {
 	return fmt.Sprint(append([]string{r.Status}, r.Fields...))
 }
@@ -43,6 +52,10 @@ func reply(r redisx.Reply) string {
 func TestQueueJoinAndResolve(t *testing.T) {
 	f := newFixture(t)
 	a, b, c := uuid.New(), uuid.New(), uuid.New()
+	if r := f.join(a, nowMS, "0.9", false); r.Status != "NOT_INIT" {
+		t.Fatalf("join before restore: %s", reply(r))
+	}
+	f.initQueue()
 	// Pre-queue: b has the lower score, so b gets ticket 1.
 	if r := f.join(a, nowMS, "0.9", false); r.Status != "PRE" {
 		t.Fatalf("pre join a: %s", reply(r))
@@ -101,6 +114,10 @@ func TestQueueTickClaimRejoin(t *testing.T) {
 		t.Fatal("tick without inventory set soldout")
 	}
 	f.load(2, nil, 0) // 2 seats -> target max(1, ceil(2*1.5)) = 3
+	if got := reply(f.tick(nowMS, 10, 1, 5)); got != "[NOT_INIT]" {
+		t.Errorf("tick before restore = %s", got)
+	}
+	f.initQueue()
 	if got := reply(f.tick(nowMS, 10, 1, 5)); got != "[PREQUEUE]" {
 		t.Errorf("tick before T0 = %s", got)
 	}
@@ -123,10 +140,10 @@ func TestQueueTickClaimRejoin(t *testing.T) {
 		t.Errorf("tick 2 (full) = %s", got)
 	}
 	exp := strconv.FormatInt(opensMS+10+600_000, 10)
-	if got := reply(f.claim(1, users[0], opensMS+10)); got != "[ADMITTED "+exp+"]" {
+	if got := reply(f.claim(1, users[0], opensMS+10)); got != "[ADMITTED "+exp+" 1]" {
 		t.Errorf("claim 1 = %s", got)
 	}
-	if got := reply(f.claim(1, users[0], opensMS+20)); got != "[ADMITTED "+exp+"]" {
+	if got := reply(f.claim(1, users[0], opensMS+20)); got != "[ADMITTED "+exp+" 0]" {
 		t.Errorf("claim 1 replay = %s", got)
 	}
 	if got := reply(f.claim(4, users[3], opensMS+20)); got != "[WAITING]" {
@@ -174,6 +191,7 @@ func TestQueueTickClaimRejoin(t *testing.T) {
 
 func TestQueueRejoinLimit(t *testing.T) {
 	f := newFixture(t)
+	f.initQueue()
 	f.load(1, nil, 0) // target = max(1, ceil(1.5)) = 2
 	u := uuid.New()
 	now := opensMS
@@ -193,5 +211,68 @@ func TestQueueRejoinLimit(t *testing.T) {
 	}
 	if r.Status != "REJOIN_LIMIT" {
 		t.Errorf("third rejoin = %s, want REJOIN_LIMIT", reply(r))
+	}
+}
+
+// TestQueueRestoreDumpReopen covers the R1 scripts (ADR 0009): restore
+// raises counters, re-creates the snapshot's offers with fresh deadlines and
+// its admissions with their old expiries, runs only once, and dump reads it
+// all back; reopen refuses a queue with entries and sets the q:opens override.
+func TestQueueRestoreDumpReopen(t *testing.T) {
+	f := newFixture(t)
+	u1, u2 := uuid.New(), uuid.New()
+	dump := func() string { return reply(f.run(redisx.QueueDump, keys.QueueDumpKeys(f.eid))) }
+	if got := dump(); got != "[0 -1 0 0 0 0 0 0 0]" {
+		t.Errorf("empty dump = %s", got)
+	}
+	// presize 40, tail 60, cursor 30, not sold out, rate 2.5, offers {29, 30},
+	// active {u1 live, u2 already expired}.
+	r := reply(f.run(redisx.QueueRestore, keys.QueueRestoreKeys(f.eid), nowMS, 60_000, 40, 60, 30, 0, "2.5",
+		2, 29, 30, 2, u1.String(), nowMS+5_000, u2.String(), nowMS-1))
+	if r != "[OK]" {
+		t.Fatalf("restore = %s", r)
+	}
+	deadline := strconv.FormatInt(nowMS+60_000, 10)
+	want := fmt.Sprintf("[1 40 60 30 0 2.5 0 2 29 30 1 %s %d]", u1, nowMS+5_000)
+	if got := dump(); got != want {
+		t.Errorf("dump after restore = %s, want %s", got, want)
+	}
+	if got := f.rdb.ZScore(f.ctx, keys.QOffers(f.eid), "29").Val(); strconv.FormatFloat(got, 'f', 0, 64) != deadline {
+		t.Errorf("offer 29 deadline = %v, want %s", got, deadline)
+	}
+	// A second restore (another replica, or a stale snapshot) is a no-op.
+	r = reply(f.run(redisx.QueueRestore, keys.QueueRestoreKeys(f.eid), nowMS, 60_000, 1, 1, 1, 1, "0", 0, 0))
+	if r != "[ALREADY]" || dump() != want {
+		t.Errorf("second restore = %s, dump %s", r, dump())
+	}
+	// The restored admission is idempotent: no second admission for u1.
+	if got := reply(f.claim(29, u1, nowMS+10)); got != fmt.Sprintf("[ADMITTED %d 0]", nowMS+5_000) {
+		t.Errorf("claim by restored admission = %s", got)
+	}
+	// Reopen refuses: tickets exist.
+	if got := reply(f.run(redisx.QueueReopen, keys.QueueReopenKeys(f.eid), nowMS+1)); got != "[BUSY 100]" {
+		t.Errorf("reopen with tickets = %s", got)
+	}
+
+	// A queue nobody joined: frozen at 0 by a tick, reopened to a later T0.
+	g := newFixture(t)
+	g.initQueue()
+	g.load(2, nil, 0)
+	if got := reply(g.tick(opensMS, 10, 1, 5)); got != "[ADMITTING 0 3 0 0 0]" {
+		t.Fatalf("empty tick after T0 = %s", got)
+	}
+	later := opensMS + 600_000
+	if got := reply(g.run(redisx.QueueReopen, keys.QueueReopenKeys(g.eid), later)); got != "[OK]" {
+		t.Fatalf("reopen = %s", got)
+	}
+	// Callers still pass the old T0; q:opens wins: pre-queue again.
+	if got := reply(g.tick(opensMS+1, 10, 1, 5)); got != "[PREQUEUE]" {
+		t.Errorf("tick after reopen = %s", got)
+	}
+	if got := reply(g.join(u1, opensMS+2, "0.5", false)); got != "[PRE]" {
+		t.Errorf("join after reopen = %s", got)
+	}
+	if got := reply(g.run(redisx.QueueReopen, keys.QueueReopenKeys(g.eid), later)); got != "[BUSY 1]" {
+		t.Errorf("reopen with a lottery entry = %s", got)
 	}
 }

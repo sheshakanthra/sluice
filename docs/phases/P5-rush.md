@@ -25,7 +25,7 @@ Build the machine that produces the claim. It needs a 50k-user swarm with honest
 4. **`sluice audit`** (`internal/audit`), per LOADTEST §6: settle, then every check, `audit.json`, and the exit codes. It's also called at the end of `sluice rush --audit`.
 5. **Baselines** (only in rush/test). These are the code a hurried team would write. Keep them small and realistic:
    - **`BASELINE=naive`:**
-     - *Hold* is a read-only availability check against `naive_sales` (migration `0002_naive_baseline.sql`). Nothing is reserved, and the response is a pseudo-hold carrying an `order_ref`. Best-available picks the lowest unsold seat numbers it just read.
+     - *Hold* is a read-only availability check against `naive_sales` (migration `0003_naive_baseline.sql`; 0002 is the queue snapshot state, ADR 0009). Nothing is reserved, and the response is a pseudo-hold carrying an `order_ref`. Best-available picks the lowest unsold seat numbers it just read.
      - *Pay* does a check-then-insert into `naive_sales` with no lock and no constraint. It then creates a MockPay intent with `confirm=true`, a **random** PSP key and `merchant_ref = order_ref`, and captures immediately.
      - No idempotency middleware.
    - **`BASELINE=holds_only`:** the correct holds, orders and ConfirmOrder (no oversell possible). But `/pay` uses the naive payment path: every call creates a new intent with a random key and captures it, without consulting the order's live payment.

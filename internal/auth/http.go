@@ -180,3 +180,12 @@ func (k *Keyring) TestAdmitHandler(resolve EventResolver, ttl time.Duration, log
 		httpx.WriteJSON(w, http.StatusOK, AdmitResponse{EventID: eid, UserID: req.UserID, AdmissionToken: tok, ExpiresAt: c.ExpiresAt()})
 	}
 }
+
+// RequestSubject is Subject applied to the request's bearer token.
+func (k *Keyring) RequestSubject(r *http.Request) (uuid.UUID, bool) {
+	tok, err := Bearer(r)
+	if err != nil {
+		return uuid.Nil, false
+	}
+	return k.Subject(tok)
+}

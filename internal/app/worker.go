@@ -71,7 +71,7 @@ func RunWorker(ctx context.Context, cfg *config.Config, log *slog.Logger) error 
 		return fmt.Errorf("worker: %w", err)
 	}
 
-	ctrl, err := newQueueController(cfg, log, gen.New(pg), sc)
+	ctrl, qsnap, err := newQueueWorker(cfg, log, reg, gen.New(pg), sc)
 	if err != nil {
 		return fmt.Errorf("worker: %w", err)
 	}
@@ -90,6 +90,7 @@ func RunWorker(ctx context.Context, cfg *config.Config, log *slog.Logger) error 
 	g.Go(func() error { return inv.RunSweeper(gctx, cfg.SweeperInterval) })
 	g.Go(func() error { return runIdempotencyGC(gctx, gen.New(pg), log) })
 	g.Go(func() error { return ctrl.Run(gctx) })
+	g.Go(func() error { return qsnap.Run(gctx, queuePersistInterval) })
 	g.Go(func() error {
 		if err := rc.Start(gctx); err != nil {
 			return fmt.Errorf("river start: %w", err)

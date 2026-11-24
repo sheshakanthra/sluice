@@ -28,6 +28,7 @@ const (
 	CodeHoldLimit                Code = "HOLD_LIMIT"
 	CodeHoldExpired              Code = "HOLD_EXPIRED"
 	CodeRejoinLimit              Code = "REJOIN_LIMIT"
+	CodeEventState               Code = "EVENT_STATE"
 	CodeOrderState               Code = "ORDER_STATE"
 	CodeRequestInProgress        Code = "REQUEST_IN_PROGRESS"
 	CodeQuotaExceeded            Code = "QUOTA_EXCEEDED"
@@ -58,6 +59,7 @@ var catalogue = map[Code]codeInfo{
 	CodeHoldLimit:                {http.StatusConflict, "You already hold seats for this event"},
 	CodeHoldExpired:              {http.StatusConflict, "Your hold has expired"},
 	CodeRejoinLimit:              {http.StatusConflict, "You have already rejoined the queue the maximum number of times"},
+	CodeEventState:               {http.StatusConflict, "The event is not in a state that allows this"},
 	CodeOrderState:               {http.StatusConflict, "That action is not allowed in the order's current state"},
 	CodeRequestInProgress:        {http.StatusConflict, "A request with this Idempotency-Key is still in progress"},
 	CodeQuotaExceeded:            {http.StatusUnprocessableEntity, "This would exceed the per-user ticket limit"},

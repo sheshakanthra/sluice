@@ -34,6 +34,10 @@ type Options struct {
 	Jitter       func() float64 // returns U(0,1); nil = math/rand/v2
 	Log          *slog.Logger
 	Metrics      *Metrics
+	// Restorer initialises the queue counters when a join finds them missing
+	// (a fresh event, or Redis lost them). nil: such joins fail with
+	// ErrNotRestored and the worker restores within one tick.
+	Restorer *Restorer
 }
 
 // Service answers join, status and leave for one API replica.
@@ -107,6 +111,12 @@ type StatusResponse struct {
 // ticket at the back after OFFER_EXPIRED; it fails with ErrRejoinLimit after
 // MaxRejoins.
 func (s *Service) Join(ctx context.Context, ev Event, uid uuid.UUID, rejoin bool) (JoinResponse, error) {
+	resp, err := s.doJoin(ctx, ev, uid, rejoin)
+	s.opt.Metrics.join(resp.State, err)
+	return resp, err
+}
+
+func (s *Service) doJoin(ctx context.Context, ev Event, uid uuid.UUID, rejoin bool) (JoinResponse, error) {
 	now := s.opt.Now()
 	resp := JoinResponse{OpensAt: ev.SaleOpensAt}
 	switch ev.Status {
@@ -165,8 +175,26 @@ func (s *Service) join(ctx context.Context, ev Event, uid uuid.UUID, rejoin bool
 	}
 	ctx, cancel := context.WithTimeout(ctx, scriptTimeout)
 	defer cancel()
-	return s.sc.Run(ctx, redisx.QueueJoin, keys.QueueJoinKeys(ev.ID, uid),
-		uid.String(), now.UnixMilli(), ev.SaleOpensAt.UnixMilli(), score, rj, MaxRejoins)
+	run := func() (redisx.Reply, error) {
+		return s.sc.Run(ctx, redisx.QueueJoin, keys.QueueJoinKeys(ev.ID, uid),
+			uid.String(), now.UnixMilli(), ev.SaleOpensAt.UnixMilli(), score, rj, MaxRejoins)
+	}
+	r, err := run()
+	if err != nil || r.Status != tickNotInit {
+		return r, err
+	}
+	// Fresh event, or Redis lost the queue keys: restore the counters from
+	// the PG snapshot first (R1), then join.
+	if s.opt.Restorer == nil {
+		return r, ErrNotRestored
+	}
+	if _, err := s.opt.Restorer.Restore(ctx, ev.ID); err != nil {
+		return r, err
+	}
+	if r, err = run(); err == nil && r.Status == tickNotInit {
+		err = ErrNotRestored
+	}
+	return r, err
 }
 
 // Status answers a queue-token holder. WAITING users (ticket above the
@@ -174,6 +202,14 @@ func (s *Service) join(ctx context.Context, ev Event, uid uuid.UUID, rejoin bool
 // calls. Redis is called only to resolve a pre-queue ticket once after T0,
 // to claim an offer, or the first time this replica sees the event.
 func (s *Service) Status(ctx context.Context, ev Event, c auth.Claims) (StatusResponse, error) {
+	resp, err := s.doStatus(ctx, ev, c)
+	if err == nil {
+		s.opt.Metrics.status(resp.State)
+	}
+	return resp, err
+}
+
+func (s *Service) doStatus(ctx context.Context, ev Event, c auth.Claims) (StatusResponse, error) {
 	now := s.opt.Now()
 	resp := StatusResponse{OpensAt: ev.SaleOpensAt}
 	snap := s.cache.Peek(ev.ID)
@@ -280,14 +316,19 @@ func (s *Service) claim(ctx context.Context, ev Event, uid uuid.UUID, ticket int
 		if err != nil {
 			return resp, fmt.Errorf("queue: claim reply: %w", err)
 		}
+		// The token expires with the admission in q:active (floored to
+		// the second), so every claim of the same admission, including a
+		// re-claim after a restore, reports the same expiry.
 		exp := time.UnixMilli(expMS).UTC()
-		ttl := exp.Sub(now)
-		if ttl <= 0 {
-			ttl = s.opt.AdmissionTTL
+		if !exp.After(now) {
+			exp = now.Add(s.opt.AdmissionTTL)
 		}
-		tok, c, err := s.keys.Issue(auth.AudAdmission, uid, ev.ID, nil, ttl)
+		tok, c, err := s.keys.IssueUntil(auth.AudAdmission, uid, ev.ID, nil, exp)
 		if err != nil {
 			return resp, err
+		}
+		if isNew, err := r.Int(1); err == nil && isNew == 1 {
+			s.opt.Metrics.admitted()
 		}
 		exp = c.ExpiresAt()
 		resp.State, resp.AdmissionToken, resp.AdmissionExpiresAt = StateAdmitted, &tok, &exp

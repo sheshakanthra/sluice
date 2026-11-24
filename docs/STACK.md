@@ -94,13 +94,14 @@ sluice/
 │                              #   redistest: Redis 8 per package, FLUSHALL per test (no t.Parallel)
 ├── db/
 │   ├── embed.go               # package dbfs: //go:embed migrations/*.sql
-│   ├── migrations/            # goose: 0001_init.sql, 0002_naive_baseline.sql, ...
+│   ├── migrations/            # goose: 0001_init.sql, 0002_queue_snapshot_state.sql, 0003_naive_baseline.sql, ...
 │   ├── queries/               # sqlc query files
 │   └── sqlc.yaml
 ├── web/                       # Next.js static-export app (scripts/screenshots.mjs = Quality-bar review)
 ├── design-system/             # UI UX Pro Max output: MASTER.md (+ Direction notes) + pages/*.md; contrast.py
 ├── loadtest/
 │   ├── k6/                    # spike-queue.js, checkout.js
+│   ├── manual/                # phase manual-check scripts (p4-flow.py: open-sale → queue → buy)
 │   └── results/               # raw runs (gitignored); curated copies go to docs/results/
 ├── deploy/
 │   ├── compose.yml            # infra: postgres, redis, prometheus, grafana

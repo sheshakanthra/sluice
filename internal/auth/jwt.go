@@ -94,6 +94,18 @@ func NewKeyring(keys []config.TokenKey, now func() time.Time) (*Keyring, error) 
 // may be uuid.Nil (session tokens).
 func (k *Keyring) Issue(aud Audience, subject, eventID uuid.UUID, ticket *int64, ttl time.Duration) (string, Claims, error) {
 	now := k.now().Truncate(time.Second)
+	return k.issue(aud, subject, eventID, ticket, now, now.Add(ttl))
+}
+
+// IssueUntil signs a token that expires at exp, floored to the second (JWT
+// exp has 1 s resolution), so it never outlives the thing it stands for.
+// Unlike Issue, the expiry does not depend on when the call is made: every
+// token issued for the same admission carries the same exp.
+func (k *Keyring) IssueUntil(aud Audience, subject, eventID uuid.UUID, ticket *int64, exp time.Time) (string, Claims, error) {
+	return k.issue(aud, subject, eventID, ticket, k.now().Truncate(time.Second), exp.Truncate(time.Second))
+}
+
+func (k *Keyring) issue(aud Audience, subject, eventID uuid.UUID, ticket *int64, now, exp time.Time) (string, Claims, error) {
 	jti, err := uuid.NewV7()
 	if err != nil {
 		return "", Claims{}, fmt.Errorf("auth: jti: %w", err)
@@ -101,7 +113,7 @@ func (k *Keyring) Issue(aud Audience, subject, eventID uuid.UUID, ticket *int64,
 	wc := wireClaims{
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer: Issuer, Subject: subject.String(), Audience: jwt.ClaimStrings{string(aud)},
-			IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(now.Add(ttl)), ID: jti.String(),
+			IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(exp), ID: jti.String(),
 		},
 		Ticket: ticket,
 	}
@@ -115,7 +127,7 @@ func (k *Keyring) Issue(aud Audience, subject, eventID uuid.UUID, ticket *int64,
 		return "", Claims{}, fmt.Errorf("auth: sign: %w", err)
 	}
 	return s, Claims{Subject: subject, Audience: aud, EventID: eventID, Ticket: ticket,
-		IssuedAt: now, Expires: now.Add(ttl), ID: wc.ID}, nil
+		IssuedAt: now, Expires: exp, ID: wc.ID}, nil
 }
 
 // Verify checks the signature, issuer, audience and lifetime of token.
@@ -153,4 +165,21 @@ func (k *Keyring) key(t *jwt.Token) (any, error) {
 		return secret, nil
 	}
 	return nil, errors.New("unknown kid")
+}
+
+// Subject verifies token's signature, issuer and lifetime, whatever its
+// audience, and returns its subject. Rate limiters use it to key by user
+// before the route's own Require runs.
+func (k *Keyring) Subject(token string) (uuid.UUID, bool) {
+	var wc wireClaims
+	_, err := jwt.ParseWithClaims(token, &wc, k.key,
+		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+		jwt.WithIssuer(Issuer), jwt.WithExpirationRequired(),
+		jwt.WithLeeway(ClockSkew), jwt.WithTimeFunc(k.now),
+	)
+	if err != nil {
+		return uuid.Nil, false
+	}
+	sub, err := uuid.Parse(wc.Subject)
+	return sub, err == nil && sub != uuid.Nil
 }

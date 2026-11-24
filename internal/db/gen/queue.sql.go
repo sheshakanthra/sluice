@@ -7,12 +7,13 @@ package gen
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
 
 const getQueueSnapshot = `-- name: GetQueueSnapshot :one
-SELECT event_id, presize, tail, cursor, sold_out, taken_at FROM queue_snapshots WHERE event_id = $1
+SELECT event_id, presize, tail, cursor, sold_out, taken_at, admit_rate, offers, active_uids, active_exp_ms FROM queue_snapshots WHERE event_id = $1
 `
 
 func (q *Queries) GetQueueSnapshot(ctx context.Context, eventID uuid.UUID) (QueueSnapshot, error) {
@@ -25,35 +26,59 @@ func (q *Queries) GetQueueSnapshot(ctx context.Context, eventID uuid.UUID) (Queu
 		&i.Cursor,
 		&i.SoldOut,
 		&i.TakenAt,
+		&i.AdmitRate,
+		&i.Offers,
+		&i.ActiveUids,
+		&i.ActiveExpMs,
 	)
 	return i, err
 }
 
-const upsertQueueSnapshot = `-- name: UpsertQueueSnapshot :exec
+const upsertQueueSnapshot = `-- name: UpsertQueueSnapshot :execrows
 
-INSERT INTO queue_snapshots (event_id, presize, tail, cursor, sold_out, taken_at)
-VALUES ($1, $2, $3, $4, $5, now())
+INSERT INTO queue_snapshots (event_id, presize, tail, cursor, sold_out, admit_rate, offers,
+                             active_uids, active_exp_ms, taken_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7::bigint[],
+        $8::uuid[], $9::bigint[], $10)
 ON CONFLICT (event_id) DO UPDATE
 SET presize = EXCLUDED.presize, tail = EXCLUDED.tail, cursor = EXCLUDED.cursor,
-    sold_out = EXCLUDED.sold_out, taken_at = EXCLUDED.taken_at
+    sold_out = EXCLUDED.sold_out, admit_rate = EXCLUDED.admit_rate, offers = EXCLUDED.offers,
+    active_uids = EXCLUDED.active_uids, active_exp_ms = EXCLUDED.active_exp_ms,
+    taken_at = EXCLUDED.taken_at
+WHERE queue_snapshots.taken_at <= EXCLUDED.taken_at
 `
 
 type UpsertQueueSnapshotParams struct {
-	EventID uuid.UUID
-	Presize *int64
-	Tail    int64
-	Cursor  int64
-	SoldOut bool
+	EventID     uuid.UUID
+	Presize     *int64
+	Tail        int64
+	Cursor      int64
+	SoldOut     bool
+	AdmitRate   float64
+	Offers      []int64
+	ActiveUids  []uuid.UUID
+	ActiveExpMs []int64
+	TakenAt     time.Time
 }
 
 // Queue snapshots for R1 (queue restore after Redis loss).
-func (q *Queries) UpsertQueueSnapshot(ctx context.Context, arg UpsertQueueSnapshotParams) error {
-	_, err := q.db.Exec(ctx, upsertQueueSnapshot,
+// The worker writes this every second. taken_at comes from the caller and
+// only moves forward, so a slow writer can never replace a newer snapshot.
+func (q *Queries) UpsertQueueSnapshot(ctx context.Context, arg UpsertQueueSnapshotParams) (int64, error) {
+	result, err := q.db.Exec(ctx, upsertQueueSnapshot,
 		arg.EventID,
 		arg.Presize,
 		arg.Tail,
 		arg.Cursor,
 		arg.SoldOut,
+		arg.AdmitRate,
+		arg.Offers,
+		arg.ActiveUids,
+		arg.ActiveExpMs,
+		arg.TakenAt,
 	)
-	return err
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

@@ -48,11 +48,14 @@ const (
 	QueueClaim      = "queue_claim"
 	QueueLeave      = "queue_leave"
 	QueueTick       = "queue_tick"
+	QueueRestore    = "queue_restore"
+	QueueDump       = "queue_dump"
+	QueueReopen     = "queue_reopen"
 )
 
 var scriptNames = []string{
 	HoldSeats, HoldBest, HoldExtend, HoldConsume, HoldRelease, InventoryLoad, InventoryRepair, Snapshot,
-	QueueJoin, QueueResolve, QueueClaim, QueueLeave, QueueTick,
+	QueueJoin, QueueResolve, QueueClaim, QueueLeave, QueueTick, QueueRestore, QueueDump, QueueReopen,
 }
 
 // Scripts is the set of loaded scripts plus their latency histogram.

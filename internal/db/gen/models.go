@@ -418,12 +418,16 @@ type Payment struct {
 }
 
 type QueueSnapshot struct {
-	EventID uuid.UUID
-	Presize *int64
-	Tail    int64
-	Cursor  int64
-	SoldOut bool
-	TakenAt time.Time
+	EventID     uuid.UUID
+	Presize     *int64
+	Tail        int64
+	Cursor      int64
+	SoldOut     bool
+	TakenAt     time.Time
+	AdmitRate   float64
+	Offers      []int64
+	ActiveUids  []uuid.UUID
+	ActiveExpMs []int64
 }
 
 type Seat struct {

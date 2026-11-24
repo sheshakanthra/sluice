@@ -136,6 +136,7 @@ func (f *faults) RoundTrip(r *http.Request) (*http.Response, error) {
 
 type harness struct {
 	t     *testing.T
+	log   *slog.Logger // captured; printed when the test fails
 	ctx   context.Context
 	clk   *clock
 	pool  *pgxpool.Pool
@@ -164,6 +165,7 @@ type hopts struct {
 	holdTTL    time.Duration
 	payTTL     time.Duration
 	maxDelay   time.Duration
+	timeout    time.Duration // the harness context (default 4 min)
 }
 
 type hopt func(*hopts)
@@ -172,16 +174,17 @@ func withWorker() hopt                      { return func(o *hopts) { o.worker =
 func withDispatcher() hopt                  { return func(o *hopts) { o.dispatcher = true } }
 func withCapacity(n int) hopt               { return func(o *hopts) { o.capacity = n } }
 func withWebhookDelay(d time.Duration) hopt { return func(o *hopts) { o.maxDelay = d } }
+func withTimeout(d time.Duration) hopt      { return func(o *hopts) { o.timeout = d } }
 
 func newHarness(t *testing.T, opts ...hopt) *harness {
 	t.Helper()
-	o := hopts{capacity: 20, holdTTL: time.Minute, payTTL: 2 * time.Minute}
+	o := hopts{capacity: 20, holdTTL: time.Minute, payTTL: 2 * time.Minute, timeout: 4 * time.Minute}
 	for _, f := range opts {
 		f(&o)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), o.timeout)
 	t.Cleanup(cancel)
-	h := &harness{t: t, ctx: ctx, clk: &clock{}, reg: prometheus.NewRegistry()}
+	h := &harness{t: t, ctx: ctx, clk: &clock{}, reg: prometheus.NewRegistry(), log: newServerLog(t)}
 	h.pool, _ = pgs.NewMigratedDB(t)
 	h.q = gen.New(h.pool)
 	h.rdb = rs.NewClient(t)
@@ -201,7 +204,7 @@ func newHarness(t *testing.T, opts ...hopt) *harness {
 	h.mp, err = mockpay.New(ctx, mpPool, prometheus.NewRegistry(), mockpay.Options{
 		APIKey: apiKey, WebhookURL: h.api.URL + orders.RouteWebhook[len("POST "):], WebhookSecret: webhookSecret,
 		PublicURL: h.mpSrv.URL, Hang: pspHang, AllowFaultHeader: true, DispatchInterval: 20 * time.Millisecond,
-		WebhookMaxDelay: o.maxDelay, SlowDelay: 100 * time.Millisecond, Log: discard(),
+		WebhookMaxDelay: o.maxDelay, SlowDelay: 100 * time.Millisecond, Log: h.log.With("svc", "mockpay"),
 	})
 	mustNil(t, err)
 	mpHandler = h.mp.Handler()
@@ -218,14 +221,18 @@ func newHarness(t *testing.T, opts ...hopt) *harness {
 	mustNil(t, err)
 	var svc *orders.Service
 	h.inv, err = inventory.NewService(h.pool, h.rdb, sc, inventory.Options{
-		HoldTTL: o.holdTTL, MaxSeats: 4, Now: h.clk.now, Metrics: im,
+		HoldTTL: o.holdTTL, MaxSeats: 4, Now: h.clk.now, Metrics: im, Log: h.log,
 		OnReclaim: func(ctx context.Context, tx pgx.Tx, hid uuid.UUID) error { return svc.OnReclaim(ctx, tx, hid) },
 	})
 	mustNil(t, err)
 
 	pm, err := payments.NewMetrics(h.reg)
 	mustNil(t, err)
-	h.flt = &faults{base: http.DefaultTransport}
+	// Faults wrap the production transport (bounded keep-alive pool), not
+	// http.DefaultTransport, so load tests see the real connection limits.
+	base := payments.NewTransport(pspTimeout)
+	h.flt = &faults{base: base}
+	t.Cleanup(base.CloseIdleConnections)
 	h.psp, err = payments.NewClient(payments.Options{BaseURL: h.mpSrv.URL, PublicURL: h.mpSrv.URL, APIKey: apiKey,
 		Timeout: pspTimeout, Transport: h.flt, Metrics: pm})
 	mustNil(t, err)
@@ -235,6 +242,7 @@ func newHarness(t *testing.T, opts ...hopt) *harness {
 	mustNil(t, err)
 	svc, err = orders.NewService(h.pool, h.inv, h.psp, h.river, h.rdb, orders.Options{
 		PaymentHoldTTL: o.payTTL, ReturnURL: "http://app.test/order", OrphanAge: time.Second, Now: h.clk.now, Metrics: om,
+		Log: h.log,
 	})
 	mustNil(t, err)
 	h.svc = svc
@@ -243,13 +251,13 @@ func newHarness(t *testing.T, opts ...hopt) *harness {
 	mustNil(t, err)
 	replays, err := httpx.NewReplayCounter(h.reg)
 	mustNil(t, err)
-	idem := httpx.NewIdempotency(h.q, auth.UserID, nil, nil).WithReplays(replays)
+	idem := httpx.NewIdempotency(h.q, auth.UserID, h.log, nil).WithReplays(replays)
 	rt := httpx.NewRouter()
 	inventory.RegisterRoutes(rt, inventory.HandlerDeps{Svc: h.inv, Keys: h.keys, Idem: idem, QueueEnforced: true,
-		AdminToken: adminToken, Log: discard()})
+		AdminToken: adminToken, Log: h.log})
 	orders.RegisterRoutes(rt, orders.HandlerDeps{Svc: svc, Keys: h.keys, Idem: idem, QueueEnforced: true,
-		AdminToken: adminToken, WebhookSecret: webhookSecret, Log: discard()})
-	apiHandler = httpx.Chain(rt, httpx.Recover(discard()))
+		AdminToken: adminToken, WebhookSecret: webhookSecret, Log: h.log})
+	apiHandler = httpx.Chain(rt, httpx.Recover(h.log))
 
 	if o.worker {
 		h.worker, err = jobs.NewWorkerClient(h.pool, svc, jobs.Config{
@@ -270,7 +278,36 @@ func newHarness(t *testing.T, opts ...hopt) *harness {
 	return h
 }
 
-func discard() *slog.Logger { return slog.New(slog.DiscardHandler) }
+// serverLog collects every log line the harness's servers write (API
+// handlers, services, MockPay). When the test fails, the whole log is
+// printed with t.Log, so a 500 shows its wrapped error and SQLSTATE instead
+// of disappearing into a discard logger.
+type serverLog struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (l *serverLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.Write(p)
+}
+
+func (l *serverLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.buf.String()
+}
+
+func newServerLog(t *testing.T) *slog.Logger {
+	l := &serverLog{}
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("server log (%s):\n%s", t.Name(), l.String())
+		}
+	})
+	return slog.New(slog.NewJSONHandler(l, &slog.HandlerOptions{Level: slog.LevelDebug}))
+}
 
 func (h *harness) newEvent(capacity int) uuid.UUID {
 	h.t.Helper()

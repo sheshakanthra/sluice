@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sheshakanthra/sluice/internal/auth"
+	"github.com/sheshakanthra/sluice/internal/db"
 	"github.com/sheshakanthra/sluice/internal/httpx"
 	"github.com/sheshakanthra/sluice/internal/inventory"
 	"github.com/sheshakanthra/sluice/internal/payments"
@@ -241,7 +242,9 @@ func (d HandlerDeps) writeError(w http.ResponseWriter, r *http.Request, err erro
 	case errors.Is(err, inventory.ErrEventNotFound):
 		httpx.WriteError(w, r, httpx.CodeNotFound, "no such event")
 	case errors.As(err, &pgErr):
-		d.Log.ErrorContext(r.Context(), "orders", slog.String("error", err.Error()))
+		// A database error we did not map is a bug: log the whole wrapped
+		// chain plus SQLSTATE, table and constraint, then answer 500.
+		d.Log.ErrorContext(r.Context(), "orders: unexpected database error", db.ErrorAttrs(err)...)
 		httpx.WriteError(w, r, httpx.CodeInternal, "")
 	default:
 		d.Log.ErrorContext(r.Context(), "orders dependency", slog.String("error", err.Error()))
