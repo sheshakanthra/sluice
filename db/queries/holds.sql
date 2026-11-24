@@ -42,7 +42,7 @@ WHERE id = @id AND status IN ('ACTIVE', 'PAYMENT_PENDING') AND expires_at <= @no
 
 -- name: ListExpiredHolds :many
 -- Sweeper batch; SKIP LOCKED lets several workers share the work.
-SELECT id, event_id, seat_nos, fence, expires_at FROM holds
+SELECT id, event_id, user_id, seat_nos, fence, expires_at FROM holds
 WHERE status IN ('ACTIVE', 'PAYMENT_PENDING') AND expires_at <= @now
 ORDER BY expires_at
 LIMIT @batch_size
@@ -59,4 +59,4 @@ ORDER BY id;
 
 -- name: GetHoldsByIDs :many
 -- Sweeper: what PG says about holds found in the Redis expiry index.
-SELECT id, status, expires_at FROM holds WHERE id = ANY(@ids::uuid[]);
+SELECT id, user_id, status, expires_at FROM holds WHERE id = ANY(@ids::uuid[]);

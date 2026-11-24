@@ -98,6 +98,9 @@ type Metrics struct {
 	compensations prometheus.Counter
 	seats         *prometheus.GaugeVec
 	repairs       prometheus.Counter
+	// admissionsFreed counts queue admissions released when a hold or its
+	// order ended (ADR 0010 addendum).
+	admissionsFreed prometheus.Counter
 }
 
 // Hold request results (holds_requests_total{result}).
@@ -131,8 +134,12 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 		repairs: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "inventory_drift_repairs_total", Help: "Redis seats repaired from Postgres by the reconciler.",
 		}),
+		admissionsFreed: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "queue_admissions_released_total",
+			Help: "Queue admissions released because the user's hold or order ended (sold, failed, released, expired).",
+		}),
 	}
-	for _, c := range []prometheus.Collector{m.requests, m.expired, m.compensations, m.seats, m.repairs} {
+	for _, c := range []prometheus.Collector{m.requests, m.expired, m.compensations, m.seats, m.repairs, m.admissionsFreed} {
 		if err := reg.Register(c); err != nil {
 			return nil, fmt.Errorf("inventory metrics: %w", err)
 		}

@@ -181,7 +181,7 @@ func (s *Service) confirmAuthorized(ctx context.Context, p gen.Payment) error {
 	case "confirmed":
 		s.countPayment(gen.PaymentStatusAUTHORIZED)
 		s.countOrder(gen.OrderStatusCONFIRMED)
-		if err := s.inv.Consume(ctx, order.EventID, order.HoldID); err != nil {
+		if err := s.inv.Consume(ctx, order.EventID, order.HoldID, order.UserID); err != nil {
 			// The sweeper's Redis pass consumes it from PG later.
 			s.o.Log.WarnContext(ctx, "redis consume after confirm", slog.String("error", err.Error()))
 		}
@@ -247,8 +247,9 @@ func (s *Service) failAuthorized(ctx context.Context, p gen.Payment, code string
 		s.o.Log.InfoContext(ctx, "order failed, authorization will be voided", slog.String("order_id", order.ID.String()),
 			slog.String("failure_code", code))
 	}
-	if released {
-		s.inv.MirrorRelease(ctx, order.EventID, order.HoldID)
+	if released || failed {
+		// Order FAILED: release its hold in Redis and the user's admission.
+		s.inv.MirrorRelease(ctx, order.EventID, order.HoldID, order.UserID)
 	}
 	return nil
 }
@@ -402,8 +403,11 @@ func (s *Service) settle(ctx context.Context, orderID uuid.UUID) error {
 	if final != "" {
 		s.countOrder(final)
 	}
-	if released {
-		s.inv.MirrorRelease(ctx, order.EventID, order.HoldID)
+	if released || final != "" {
+		// The order is FAILED or EXPIRED: mirror the hold's release (a no-op
+		// if it already ended) and release the user's admission. The script
+		// keeps it if the user holds again by now (ADR 0010 addendum).
+		s.inv.MirrorRelease(ctx, order.EventID, order.HoldID, order.UserID)
 	}
 	return nil
 }

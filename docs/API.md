@@ -9,7 +9,7 @@ Base path `/api/v1`. JSON throughout, UTF-8. Times are RFC 3339 UTC. Money is in
 |---|---|---|---|---|
 | Session | `session` | `sub` = user_id | 24 h | `POST /sessions` |
 | Queue | `queue` | `sub`, `eid`, `tkt` (0 = pre-queue) | until event start | `POST /events/{id}/queue`, refreshed by status |
-| Admission | `admission` | `sub`, `eid` | `ADMISSION_TTL` | queue status, once ADMITTED |
+| Admission | `admission` | `sub`, `eid` | `ADMISSION_TTL` (hard cap; the server-side lease also ends after `ADMISSION_IDLE_TTL` without a request) | queue status, once ADMITTED |
 
 Send it as `Authorization: Bearer <token>`. Every token has `iss=sluice`, `iat`, `exp` and `jti`. The wrong audience or event gives 401 `TOKEN_INVALID`; an expired token gives 401 `TOKEN_EXPIRED`.
 
@@ -122,7 +122,9 @@ After T0 it returns `"state": "WAITING", "ticket_no": 41234`. Already sold out �
 ```
 `state` is one of `PREQUEUE | WAITING | PAUSED | ADMITTED | SOLD_OUT | OFFER_EXPIRED | CLOSED`.
 - `queue_token` is set when the server re-issues it: PREQUEUE → WAITING carries the resolved ticket. The client must replace its stored token.
-- `admission_token` and `admission_expires_at` are set only on ADMITTED. Both carry the admission's own expiry from `q:active`, floored to the second, so repeated polls (and a re-claim after a restore) report the same value.
+- `admission_token` and `admission_expires_at` are set only on ADMITTED. Both carry the admission's hard cap (`q:cap`: claim + `ADMISSION_TTL`), floored to the second, so repeated polls report the same value.
+- The admission is also a sliding lease: every request that presents the admission token renews it to `ADMISSION_IDLE_TTL` from now (never past the cap). An admitted user who makes no request for `ADMISSION_IDLE_TTL` loses the admission, and a later status poll answers `OFFER_EXPIRED` (ADR 0010 addendum). Clients that end without seats should still call `DELETE /queue` at once.
+- An admission ends early when the user's checkout ends: their order reaches CONFIRMED, FAILED or EXPIRED, or their hold is released or expires (ADR 0010 addendum). The admission token the user already has stays valid until its `exp`, so they can still hold again. A later status poll answers `OFFER_EXPIRED`, because the admission is no longer in `q:active` and the offer was used. A rejoin is then honoured (bounded by the two-rejoin limit and the per-user quota).
 
 ### 3.4 `POST /events/{id}/holds` (IK) → 201
 Request, one of:

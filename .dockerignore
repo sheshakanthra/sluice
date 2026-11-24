@@ -1,0 +1,13 @@
+# Build context for deploy/docker/Dockerfile: only Go sources are needed.
+.git
+.github
+.claude
+bin
+web
+docs
+design-system
+loadtest
+deploy
+*.md
+.env
+.env.*

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -221,4 +222,50 @@ func TestClientHonoursCallerContext(t *testing.T) {
 	if n := f.calls.Load(); n > 1 {
 		t.Fatalf("%d calls after cancel", n)
 	}
+}
+
+// TestConnWaitShowsPoolQueueing: with MaxConns = 1 and a PSP that takes
+// 50 ms, 4 concurrent calls queue for the single connection, and
+// psp_conn_wait_seconds records that wait (at least 50+100+150 ms in all)
+// separately from the PSP's own latency.
+func TestConnWaitShowsPoolQueueing(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(50 * time.Millisecond)
+		intentJSON(w, payments.StatusCaptured)
+	}))
+	t.Cleanup(srv.Close)
+	reg := prometheus.NewRegistry()
+	m, err := payments.NewMetrics(reg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := payments.NewClient(payments.Options{BaseURL: srv.URL, APIKey: "test-key", Timeout: 2 * time.Second,
+		MaxConns: 1, Metrics: m})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Go(func() {
+			if _, err := c.Capture(t.Context(), "pi_1"); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	wg.Wait()
+	mfs, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mf := range mfs {
+		if mf.GetName() != "psp_conn_wait_seconds" {
+			continue
+		}
+		h := mf.GetMetric()[0].GetHistogram()
+		if h.GetSampleCount() != 4 || h.GetSampleSum() < 0.29 {
+			t.Fatalf("conn wait: %d samples, %.3f s in all; want 4 and >= 0.3 s of queueing", h.GetSampleCount(), h.GetSampleSum())
+		}
+		return
+	}
+	t.Fatal("psp_conn_wait_seconds not recorded")
 }

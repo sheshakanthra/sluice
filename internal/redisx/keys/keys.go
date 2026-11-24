@@ -53,7 +53,8 @@ func QRate(eid uuid.UUID) string { return k(eid, "q:rate") }
 // QOffers is the ZSET ticket -> claim deadline.
 func QOffers(eid uuid.UUID) string { return k(eid, "q:offers") }
 
-// QActive is the ZSET uid -> admission expiry.
+// QActive is the ZSET uid -> admission lease expiry (sliding: min(last
+// request + ADMISSION_IDLE_TTL, hard cap); ADR 0010 addendum).
 func QActive(eid uuid.UUID) string { return k(eid, "q:active") }
 
 // RebuildLock is a short SET NX lock so only one process rebuilds an
@@ -86,8 +87,15 @@ func QueueResolveKeys(eid, uid uuid.UUID) []string {
 
 // QueueClaimKeys are queue_claim.lua's KEYS, in order.
 func QueueClaimKeys(eid uuid.UUID) []string {
-	return []string{QSoldOut(eid), QCursor(eid), QOffers(eid), QActive(eid)}
+	return []string{QSoldOut(eid), QCursor(eid), QOffers(eid), QActive(eid), QCap(eid)}
 }
+
+// QCap is the ZSET uid -> admission hard cap ms (claim + ADMISSION_TTL, the
+// admission token's exp). q:active holds the sliding idle lease.
+func QCap(eid uuid.UUID) string { return k(eid, "q:cap") }
+
+// QueueTouchKeys are queue_touch.lua's KEYS, in order.
+func QueueTouchKeys(eid uuid.UUID) []string { return []string{QActive(eid)} }
 
 // QueueLeaveKeys are queue_leave.lua's KEYS, in order.
 func QueueLeaveKeys(eid, uid uuid.UUID) []string {
@@ -97,7 +105,8 @@ func QueueLeaveKeys(eid, uid uuid.UUID) []string {
 // QueueTickKeys are queue_tick.lua's KEYS, in order.
 func QueueTickKeys(eid uuid.UUID) []string {
 	return []string{Meta(eid), Avail(eid), Holds(eid), Holding(eid), QPre(eid), QPreSize(eid), QTail(eid),
-		QCursor(eid), QOffers(eid), QActive(eid), QSoldOut(eid), QRate(eid), QRateAt(eid), QInit(eid), QOpens(eid)}
+		QCursor(eid), QOffers(eid), QActive(eid), QSoldOut(eid), QRate(eid), QRateAt(eid), QInit(eid), QOpens(eid),
+		QCap(eid)}
 }
 
 // SnapshotKeys are snapshot.lua's KEYS, in order.

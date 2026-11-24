@@ -6,6 +6,7 @@
 package auth
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -70,6 +71,18 @@ type Keyring struct {
 	signer config.TokenKey
 	byID   map[string][]byte
 	now    func() time.Time
+	// touch, if set, runs on every request that Require lets through with a
+	// valid admission token (the queue's sliding admission lease).
+	touch func(context.Context, Claims)
+}
+
+// WithAdmissionTouch returns a copy of k whose Require calls f with the
+// claims of every request that presents a valid admission token, before
+// the handler runs. f must be quick and must not fail the request.
+func (k *Keyring) WithAdmissionTouch(f func(context.Context, Claims)) *Keyring {
+	c := *k
+	c.touch = f
+	return &c
 }
 
 // NewKeyring builds a key ring. now may be nil (time.Now).

@@ -46,7 +46,9 @@ ADMITTED → think → [availability] → HOLD ─┬→ TAKEN/INSUFFICIENT → 
 PAY ─→ CONFIRMED → TICKET*
     ─→ FAILED (decline) → new attempt (70%) | PAYMENT_FAILED*
     ─→ PENDING (timeout) → retry same IK / poll /confirm → TICKET* | FAILED(not charged)*
-* = terminal. Users leave the queue (DELETE /queue) on NO_SEAT and ABANDONED.
+* = terminal. Users leave the queue (DELETE /queue) on NO_SEAT and ABANDONED, enforced in one
+place (user.end). INSUFFICIENT with available = 0 (every seat held, none sold) ends the retries
+at once as NO_SEAT; only a SOLD_OUT answer is SOLD_OUT.
 ```
 
 ### 3.3 Behaviour mix (scenario H)
@@ -58,9 +60,10 @@ PAY ─→ CONFIRMED → TICKET*
 | Abandon after hold (lets the TTL reclaim) | 8% |
 | Payment method `pm_ok` / `pm_decline` / `pm_timeout` | 95% / 3% / 2% |
 | Double-submit `/pay` concurrently with the **same** IK | 5% |
-| Client timeout (2 s), then retry with the **same** IK | automatic |
+| Client timeout, then retry with the **same** IK (also on 5xx, 429 after `Retry-After`, and `REQUEST_IN_PROGRESS`) | automatic |
 | Rogue retry with a **new** IK | 1% |
-| Status timeout 2 s, then retry; HTTP timeout 5 s on every other call | — |
+| Status timeout 2 s, then retry; HTTP timeout 5 s on every other call (a 2 s `/pay` timeout would race the API's 2 s PSP timeout; ADR 0010) | — |
+| Each hold attempt (pick → best → fewer) and each `/confirm` poll is a new intent with a **new** IK; a third `OFFER_EXPIRED` ends as NO_SEAT; a declined payment's retry pays with `pm_ok` | ADR 0010 |
 | Synthetic client IP (X-Forwarded-For) | ~10 users per IP (NAT-like) |
 
 ### 3.4 Measurement rules

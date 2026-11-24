@@ -1,0 +1,35 @@
+# The swarm (`sluice rush`) as a container on the stack's network, aimed at
+# http://caddy:8000. It is behind the "rush" profile so `up` never starts it;
+# run it with
+#   docker compose -f deploy/compose.yml -f deploy/compose.app.yml -f deploy/compose.rush.yml \
+#     run --rm -T rush --scenario SMOKE --event <slug> ...
+name: sluice
+
+services:
+  rush:
+    image: sluice:local
+    profiles: ["rush"]
+    entrypoint: ["/usr/local/bin/sluice", "rush"]
+    command: ["--target", "http://caddy:8000", "--scenario", "SMOKE"]
+    env_file:
+      - env/${SLUICE_ENV:-rush}.env
+    environment:
+      RUSH_RESULTS_DIR: /results
+      RUSH_RUNNER: ${RUSH_RUNNER:-local}
+      # Reported in summary.json; keep in step with deploy/compose.yml.
+      RUSH_PG_VERSION: "18.7"
+      RUSH_REDIS_VERSION: "8.10.3"
+    # 50k dedicated connections to one destination need ~64k source ports
+    # and as many file descriptors (LOADTEST §1).
+    sysctls:
+      net.ipv4.ip_local_port_range: "1024 65535"
+    ulimits:
+      nofile:
+        soft: 200000
+        hard: 200000
+    volumes:
+      - ../loadtest/results:/results
+    depends_on:
+      caddy:
+        condition: service_healthy
+    restart: "no"

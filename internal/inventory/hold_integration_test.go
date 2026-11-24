@@ -420,8 +420,8 @@ func TestReleaseExtendConsume(t *testing.T) {
 	// P3's confirm tx consumes the hold in PG; Consume mirrors it in Redis.
 	_, err = e.q.ConsumeHold(e.ctx, h2.ID)
 	mustNil(t, err)
-	mustNil(t, e.svc.Consume(e.ctx, e.eventID, h2.ID))
-	mustNil(t, e.svc.Consume(e.ctx, e.eventID, h2.ID)) // idempotent
+	mustNil(t, e.svc.Consume(e.ctx, e.eventID, h2.ID, h2.UserID))
+	mustNil(t, e.svc.Consume(e.ctx, e.eventID, h2.ID, h2.UserID)) // idempotent
 	if got := e.redisSet(keys.Sold(e.eventID)); !slices.Equal(got, []int32{5}) {
 		t.Errorf("redis sold = %v, want [5]", got)
 	}

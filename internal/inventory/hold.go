@@ -32,17 +32,73 @@ func holdScriptKeys(eid, hid uuid.UUID) []string {
 }
 
 func releaseKeys(eid, hid uuid.UUID) []string {
-	return []string{keys.Hold(eid, hid), keys.Holds(eid), keys.Holding(eid), keys.Avail(eid), keys.Ver(eid), keys.Sold(eid)}
+	return []string{keys.Hold(eid, hid), keys.Holds(eid), keys.Holding(eid), keys.Avail(eid), keys.Ver(eid), keys.Sold(eid),
+		keys.QActive(eid)}
 }
 
 func consumeKeys(eid, hid uuid.UUID) []string {
-	return []string{keys.Hold(eid, hid), keys.Holds(eid), keys.Holding(eid), keys.Sold(eid), keys.Ver(eid), keys.Avail(eid)}
+	return []string{keys.Hold(eid, hid), keys.Holds(eid), keys.Holding(eid), keys.Sold(eid), keys.Ver(eid), keys.Avail(eid),
+		keys.QActive(eid)}
 }
 
 func extendKeys(eid, hid uuid.UUID) []string { return []string{keys.Hold(eid, hid), keys.Holds(eid)} }
 
 func repairKeys(eid uuid.UUID) []string {
-	return []string{keys.Avail(eid), keys.Sold(eid), keys.Holds(eid), keys.Holding(eid), keys.Ver(eid)}
+	return []string{keys.Avail(eid), keys.Sold(eid), keys.Holds(eid), keys.Holding(eid), keys.Ver(eid), keys.QActive(eid)}
+}
+
+// admission says whether a Redis hold mirror also releases the user's queue
+// admission (ADR 0010 addendum).
+type admission bool
+
+const (
+	keepAdmission admission = false // the user is still shopping (compensation, unknown hold)
+	freeAdmission admission = true  // the hold or its order has ended in PG
+)
+
+// releaseRedis runs hold_release for hid. With freeAdmission the same script
+// removes uid from q:active unless uid still holds, so the admission
+// controller can offer the slot at once instead of after ADMISSION_TTL.
+// uid may be uuid.Nil: the script then takes it from the hold hash.
+func (s *Service) releaseRedis(ctx context.Context, eid, hid, uid uuid.UUID, a admission) error {
+	flag := 0
+	if a == freeAdmission {
+		flag = 1
+	}
+	r, err := s.sc.Run(ctx, redisx.HoldRelease, releaseKeys(eid, hid), hid.String(), uidArg(uid), flag)
+	if err != nil {
+		return err
+	}
+	s.countFreed(r)
+	return nil
+}
+
+// consumeRedis runs hold_consume for hid; the buyer's admission is released
+// in the same script (the order is CONFIRMED).
+func (s *Service) consumeRedis(ctx context.Context, eid, hid, uid uuid.UUID) error {
+	r, err := s.sc.Run(ctx, redisx.HoldConsume, consumeKeys(eid, hid), hid.String(), uidArg(uid))
+	if err != nil {
+		return err
+	}
+	s.countFreed(r)
+	return nil
+}
+
+func uidArg(uid uuid.UUID) string {
+	if uid == uuid.Nil {
+		return ""
+	}
+	return uid.String()
+}
+
+// countFreed counts an admission the script released (its last field is 1).
+func (s *Service) countFreed(r redisx.Reply) {
+	if s.metrics == nil || len(r.Fields) == 0 {
+		return
+	}
+	if n, err := r.Int(len(r.Fields) - 1); err == nil && n == 1 {
+		s.metrics.admissionsFreed.Inc()
+	}
 }
 
 // grant is what the fast path (or pg_only) decided before Postgres commits.
@@ -392,7 +448,7 @@ func (s *Service) compensate(ctx context.Context, ev *EventInfo, g grant, cause 
 	}
 	s.log.WarnContext(ctx, "hold compensation: postgres refused a redis grant",
 		slog.String("event_id", ev.ID.String()), slog.String("hold_id", g.hid.String()), slog.String("cause", cause.Error()))
-	if _, err := s.sc.Run(ctx, redisx.HoldRelease, releaseKeys(ev.ID, g.hid), g.hid.String()); err != nil {
+	if err := s.releaseRedis(ctx, ev.ID, g.hid, g.uid, keepAdmission); err != nil {
 		s.log.ErrorContext(ctx, "compensation release", slog.String("error", err.Error()))
 		return
 	}
@@ -482,7 +538,7 @@ func (s *Service) Release(ctx context.Context, holdID, userID uuid.UUID) (Hold, 
 		return Hold{}, err
 	}
 	if !s.pgOnly {
-		if _, err := s.sc.Run(ctx, redisx.HoldRelease, releaseKeys(row.EventID, holdID), holdID.String()); err != nil {
+		if err := s.releaseRedis(ctx, row.EventID, holdID, userID, freeAdmission); err != nil {
 			// PG already released; the sweeper's Redis pass finishes the job.
 			s.log.WarnContext(ctx, "redis release after PG release", slog.String("error", err.Error()))
 		}
@@ -555,26 +611,29 @@ func (s *Service) MirrorExtend(ctx context.Context, eventID, holdID uuid.UUID, e
 	}
 }
 
-// MirrorRelease copies a committed release (order failed) into Redis
-// (hold_release). Best effort: the sweeper and the reconciler repair drift.
-func (s *Service) MirrorRelease(ctx context.Context, eventID, holdID uuid.UUID) {
+// MirrorRelease copies a committed release (order failed or expired) into
+// Redis (hold_release) and releases userID's queue admission in the same
+// script (ADR 0010 addendum). Idempotent; best effort: the sweeper and the
+// reconciler repair drift, and an admission left behind expires with
+// ADMISSION_TTL.
+func (s *Service) MirrorRelease(ctx context.Context, eventID, holdID, userID uuid.UUID) {
 	if s.pgOnly {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sideEffectTimeout)
 	defer cancel()
-	if _, err := s.sc.Run(ctx, redisx.HoldRelease, releaseKeys(eventID, holdID), holdID.String()); err != nil {
+	if err := s.releaseRedis(ctx, eventID, holdID, userID, freeAdmission); err != nil {
 		s.log.WarnContext(ctx, "redis release after PG release", slog.String("error", err.Error()))
 	}
 }
 
 // Consume mirrors a committed confirm into Redis: the hold's seats move to
-// sold. The PG side (SellSeats + ConsumeHold) belongs to ConfirmOrder's
+// sold and userID's queue admission is released in the same script (ADR 0010
+// addendum). The PG side (SellSeats + ConsumeHold) belongs to ConfirmOrder's
 // transaction in P3; call this after it commits. Idempotent.
-func (s *Service) Consume(ctx context.Context, eventID, holdID uuid.UUID) error {
+func (s *Service) Consume(ctx context.Context, eventID, holdID, userID uuid.UUID) error {
 	if s.pgOnly {
 		return nil
 	}
-	_, err := s.sc.Run(ctx, redisx.HoldConsume, consumeKeys(eventID, holdID), holdID.String())
-	return err
+	return s.consumeRedis(ctx, eventID, holdID, userID)
 }

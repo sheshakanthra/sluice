@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
 	"time"
@@ -21,13 +22,14 @@ import (
 const (
 	DefaultTimeout    = 2 * time.Second
 	DefaultMaxRetries = 3
-	// MaxConnsPerHost bounds the PSP connections one process opens. Without
-	// it a burst of order creates dials one connection per call; on a busy
-	// host the PSP's accept queue overflows, refused dials are retried, and
-	// the retries keep it overflowing (seen in P4b's 200-goroutine order
-	// test: ~9k refused dials over 45 s). Calls beyond the bound wait for a
-	// free connection inside their own per-attempt timeout.
-	MaxConnsPerHost = 64
+	// DefaultMaxConns bounds the PSP connections one process opens
+	// (PSP_MAX_CONNS). Without a bound a burst of order creates dials one
+	// connection per call; on a busy host the PSP's accept queue overflows,
+	// refused dials are retried, and the retries keep it overflowing (seen
+	// in P4b's 200-goroutine order test: ~9k refused dials over 45 s). Calls
+	// beyond the bound wait for a free connection inside their own
+	// per-attempt timeout; psp_conn_wait_seconds measures that wait.
+	DefaultMaxConns = 64
 	retryBase       = 50 * time.Millisecond
 	retryCap        = 500 * time.Millisecond
 	maxResponseBody = 1 << 20
@@ -77,6 +79,7 @@ func (e *StateError) Is(target error) bool { return target == ErrIntentState }
 type Metrics struct {
 	requests *prometheus.CounterVec
 	duration *prometheus.HistogramVec
+	connWait *prometheus.HistogramVec
 }
 
 // NewMetrics registers psp_requests_total and psp_request_duration_seconds.
@@ -89,8 +92,15 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 			Name: "psp_request_duration_seconds", Help: "PSP HTTP attempt latency.",
 			Buckets: []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2, 4},
 		}, []string{"op"}),
+		// The part of psp_request_duration_seconds spent waiting for a pooled
+		// connection (or dialing one): request start -> GotConn. Compared
+		// with MockPay's mockpay_request_duration_seconds it shows pool queueing.
+		connWait: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name: "psp_conn_wait_seconds", Help: "Time a PSP attempt waited for a connection from the pool.",
+			Buckets: []float64{.0005, .001, .0025, .005, .01, .025, .05, .1, .25, .5, 1, 2},
+		}, []string{"op"}),
 	}
-	for _, c := range []prometheus.Collector{m.requests, m.duration} {
+	for _, c := range []prometheus.Collector{m.requests, m.duration, m.connWait} {
 		if err := reg.Register(c); err != nil {
 			return nil, fmt.Errorf("psp metrics: %w", err)
 		}
@@ -108,6 +118,9 @@ type Options struct {
 	Timeout time.Duration
 	// MaxRetries after the first attempt (default 3).
 	MaxRetries int
+	// MaxConns bounds the connection pool (PSP_MAX_CONNS; default
+	// DefaultMaxConns). Ignored when Transport is set.
+	MaxConns int
 	// Transport overrides the HTTP transport. Tests wrap NewTransport with
 	// fault injection, so they run on the production connection pool.
 	Transport http.RoundTripper
@@ -127,18 +140,21 @@ type Client struct {
 }
 
 // NewTransport is the client's HTTP transport: a keep-alive pool of up to
-// MaxConnsPerHost connections per PSP host, all kept idle between calls.
-// dialTimeout <= 0 means DefaultTimeout.
-func NewTransport(dialTimeout time.Duration) *http.Transport {
+// maxConns connections per PSP host, all kept idle between calls.
+// dialTimeout <= 0 means DefaultTimeout; maxConns <= 0 means DefaultMaxConns.
+func NewTransport(dialTimeout time.Duration, maxConns int) *http.Transport {
 	if dialTimeout <= 0 {
 		dialTimeout = DefaultTimeout
+	}
+	if maxConns <= 0 {
+		maxConns = DefaultMaxConns
 	}
 	return &http.Transport{
 		Proxy:               http.ProxyFromEnvironment,
 		DialContext:         (&net.Dialer{Timeout: dialTimeout}).DialContext,
-		MaxConnsPerHost:     MaxConnsPerHost,
-		MaxIdleConns:        MaxConnsPerHost,
-		MaxIdleConnsPerHost: MaxConnsPerHost,
+		MaxConnsPerHost:     maxConns,
+		MaxIdleConns:        maxConns,
+		MaxIdleConnsPerHost: maxConns,
 		IdleConnTimeout:     90 * time.Second,
 	}
 }
@@ -159,7 +175,7 @@ func NewClient(o Options) (*Client, error) {
 	}
 	tr := o.Transport
 	if tr == nil {
-		tr = NewTransport(o.Timeout)
+		tr = NewTransport(o.Timeout, o.MaxConns)
 	}
 	return &Client{
 		base: strings.TrimRight(o.BaseURL, "/"), public: strings.TrimRight(o.PublicURL, "/"), apiKey: o.APIKey, timeout: o.Timeout, retries: o.MaxRetries,
@@ -296,7 +312,16 @@ func (c *Client) once(ctx context.Context, op, method, path, key string, body []
 	if body != nil {
 		rd = bytes.NewReader(body)
 	}
-	req, err := http.NewRequestWithContext(actx, method, c.base+path, rd)
+	var start time.Time
+	rctx := actx
+	if c.metrics != nil { // pool wait: request start -> connection in hand
+		rctx = httptrace.WithClientTrace(actx, &httptrace.ClientTrace{
+			GotConn: func(httptrace.GotConnInfo) {
+				c.metrics.connWait.WithLabelValues(op).Observe(time.Since(start).Seconds())
+			},
+		})
+	}
+	req, err := http.NewRequestWithContext(rctx, method, c.base+path, rd)
 	if err != nil {
 		return false, fmt.Errorf("psp %s: build request: %w", op, err)
 	}
@@ -308,7 +333,7 @@ func (c *Client) once(ctx context.Context, op, method, path, key string, body []
 	if key != "" {
 		req.Header.Set("Idempotency-Key", key)
 	}
-	start := time.Now()
+	start = time.Now()
 	resp, err := c.http.Do(req)
 	c.observe(op, start)
 	if err != nil {

@@ -7,17 +7,18 @@ scrape_configs:
     static_configs:
       - targets: ["localhost:9090"]
 
-  # Dev processes run on the host (task dev:api / dev:worker / dev:mockpay).
-  # The full stack (P5, compose.app.yml) adds in-network targets.
+  # Dev processes run on the host (task dev:api / dev:worker / dev:mockpay);
+  # the full stack (compose.app.yml) runs in-network. Whichever is not running
+  # simply shows as down.
   - job_name: sluice-api
     static_configs:
-      - targets: ["host.docker.internal:8080"]
+      - targets: ["host.docker.internal:8080", "api1:8080", "api2:8080", "api3:8080"]
         labels: { role: api }
   - job_name: sluice-worker
     static_configs:
-      - targets: ["host.docker.internal:9091"]
+      - targets: ["host.docker.internal:9091", "worker:9091"]
         labels: { role: worker }
   - job_name: sluice-mockpay
     static_configs:
-      - targets: ["host.docker.internal:8090"]
+      - targets: ["host.docker.internal:8090", "mockpay:8090"]
         labels: { role: mockpay }

@@ -165,7 +165,8 @@ queue_tick(now):
   avail = SCARD avail; held = ZCARD holds
   if avail == 0 and held == 0: SET soldout 1; return SOLD_OUT
   if avail == 0: return PAUSED                          # everything is held; wait for expiries
-  seeking     = ZCARD active - ZINTERCARD(active, holding)   # admitted users holding nothing
+  seeking     = ZCARD active - ZINTERCARD(active, holding)   # admitted users holding nothing (finished
+                                                       # checkouts have already left active, see below)
   outstanding = ZCARD offers
   target      = min(QUEUE_MAX_ACTIVE, max(QUEUE_MIN_ADMIT, ceil(avail * QUEUE_OVERADMIT)))
   k = clamp(target - seeking - outstanding, 0, min(QUEUE_MAX_ADMIT_PER_TICK, presize + tail - cursor))
@@ -173,6 +174,23 @@ queue_tick(now):
   INCRBY cursor k
   update admit_rate_ema; return ADMITTING(k)          # ema: rate*e^(-dt/5s) + k/5s, per second
 ```
+**Admissions end with the checkout (ADR 0010 addendum).** An admission leaves `q:active` at the first of:
+- **the order reaches CONFIRMED:** `hold_consume.lua`, run right after ConfirmOrder commits, does `ZREM active uid` in the same script that moves the seats to sold;
+- **the order reaches FAILED or EXPIRED**, or **the hold is released** (`DELETE /holds/{id}`) or **expires** (sweeper or a PG takeover): `hold_release.lua` with `free_admission = 1` (or `inventory_repair.lua` for a takeover) does the `ZREM` in the same script that returns the seats;
+- **the user goes idle:** the admission is a sliding lease (below), so it ends `ADMISSION_IDLE_TTL` after the user's last request with the admission token;
+- **the user leaves:** `DELETE /queue` (the swarm and the P6 UI call it on NO_SEAT and ABANDONED; LOADTEST §3.2, DESIGN-BRIEF §5);
+- `ADMISSION_TTL` passes: the hard cap, which no renewal extends.
+
+The release is skipped while the user is still in `holding`, so a late or repeated mirror of an old hold cannot free the admission of someone who holds again. Every path is idempotent (a second run finds the hold MISSING and frees nothing new) and counted in `queue_admissions_released_total`. A compensation (PG refused a Redis grant, so the user is still shopping) keeps the admission.
+
+Why: before this, a buyer whose hold became a sale, or whose payment failed, no longer held seats but stayed in `active` until `ADMISSION_TTL`. They were counted as *seeking*, `target − seeking` went negative, and seats freed by expired holds waited up to `ADMISSION_TTL` (3 m in rush) for anyone to be offered them.
+
+**Admission is a sliding lease (ADR 0010 addendum, second part).** `queue_claim.lua` writes two scores: `q:active` uid → lease expiry `min(now + ADMISSION_IDLE_TTL, cap)` and `q:cap` uid → hard cap `claim + ADMISSION_TTL` (also the admission token's `exp`). Every request that presents a valid admission token renews the lease before its handler runs: `Keyring.Require` calls `queue.Lease.Touch`, which runs `queue_touch.lua` = one `ZADD q:active XX GT` to `min(now + idle, token exp)`. `XX` never re-creates an admission that already ended (released, left, expired); `GT` never shortens one; the token's `exp` keeps the lease at or below the hard cap. A renewal is best effort (500 ms timeout, counted in `queue_admission_touches_total{result}`), so a Redis blip cannot fail the request. The tick's `ZREMRANGEBYSCORE` then removes idle and capped admissions alike, and prunes `q:cap`. Idle admitted users therefore free their slot without client cooperation, at most `ADMISSION_IDLE_TTL` after their last request.
+
+Why: after checkouts released admissions, an admitted user who never held (for example told `INSUFFICIENT_SEATS` with 0 available, who then gave up without `DELETE /queue`) still counted as seeking until `ADMISSION_TTL`. In `smoke-20261124-110912` that was 364 users, more than the target, so the drain stayed at 392.1 s (P5a report, Fixes).
+
+**What the lease does not do.** It only takes the user out of the controller's count; the admission token stays valid until `exp`, as for a finished checkout. An idle user who comes back before `exp` can still hold. They are then outside `seeking` (bounded per user by `HOLD_LIMIT` and the quota, I4), and their next queue-status poll answers `OFFER_EXPIRED`. Rejecting such a token on the hold path is an open owner decision (P5a report).
+
 The worker runs one tick loop per non-CLOSED event and moves the event's PG status SCHEDULED → ON_SALE on the first admitting/paused tick and → SOLD_OUT when the tick sets the flag (conditional update; ADR 0008).
 Every second the worker also writes `queue_snapshots` (counters plus the live offers and admissions), used by R1. `queue_join` and `queue_tick` refuse to run until `q:init` shows the counters were restored from that snapshot, so a wiped Redis can never reissue a ticket number or re-admit from cursor 0 (DATA-MODEL §6, ADR 0009).
 

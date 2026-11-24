@@ -179,7 +179,7 @@ func TestRebuildAfterFlushAll(t *testing.T) {
 		mustNil(t, err)
 		_, err = e.q.ConsumeHold(e.ctx, h.ID)
 		mustNil(t, err)
-		mustNil(t, e.svc.Consume(e.ctx, e.eventID, h.ID))
+		mustNil(t, e.svc.Consume(e.ctx, e.eventID, h.ID, h.UserID))
 	}
 	pgView := e.pgSeatStates()
 	before := e.redisSeatStates(capacityN)
@@ -279,7 +279,7 @@ func TestAvailability(t *testing.T) {
 			mustNil(t, err)
 			_, err = e.q.SellSeats(e.ctx, gen.SellSeatsParams{OrderID: uuid.New(), EventID: e.eventID, SeatNos: []int32{6}, HoldID: h.ID})
 			mustNil(t, err)
-			mustNil(t, e.svc.Consume(e.ctx, e.eventID, h.ID))
+			mustNil(t, e.svc.Consume(e.ctx, e.eventID, h.ID, h.UserID))
 			if !m.pgOnly {
 				// Redis has 1 and 6 sold after Consume; keep 1 held to
 				// mirror PG (6 sold, 1 still HELD).

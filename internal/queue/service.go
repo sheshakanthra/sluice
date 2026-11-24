@@ -27,13 +27,17 @@ const minQueueTokenTTL = time.Minute
 
 // Options configure a Service.
 type Options struct {
-	AdmissionTTL time.Duration // admission lifetime (ADMISSION_TTL)
-	Overadmit    float64       // QUEUE_OVERADMIT, used by the outlook
-	Now          func() time.Time
-	Rand         io.Reader      // lottery scores; nil = crypto/rand
-	Jitter       func() float64 // returns U(0,1); nil = math/rand/v2
-	Log          *slog.Logger
-	Metrics      *Metrics
+	AdmissionTTL time.Duration // admission hard cap (ADMISSION_TTL)
+	// AdmissionIdleTTL is the sliding idle lease (ADMISSION_IDLE_TTL): an
+	// admitted user whose last admission-token request is older than this
+	// leaves q:active. 0 means AdmissionTTL (no idle expiry).
+	AdmissionIdleTTL time.Duration
+	Overadmit        float64 // QUEUE_OVERADMIT, used by the outlook
+	Now              func() time.Time
+	Rand             io.Reader      // lottery scores; nil = crypto/rand
+	Jitter           func() float64 // returns U(0,1); nil = math/rand/v2
+	Log              *slog.Logger
+	Metrics          *Metrics
 	// Restorer initialises the queue counters when a join finds them missing
 	// (a fresh event, or Redis lost them). nil: such joins fail with
 	// ErrNotRestored and the worker restores within one tick.
@@ -53,8 +57,11 @@ func NewService(sc *redisx.Scripts, keyring *auth.Keyring, cache *Cache, opt Opt
 	if sc == nil || keyring == nil || cache == nil {
 		return nil, errors.New("queue: scripts, keyring and cache are required")
 	}
-	if opt.AdmissionTTL <= 0 || opt.Overadmit < 1 {
-		return nil, errors.New("queue: AdmissionTTL > 0 and Overadmit >= 1 are required")
+	if opt.AdmissionTTL <= 0 || opt.Overadmit < 1 || opt.AdmissionIdleTTL < 0 || opt.AdmissionIdleTTL > opt.AdmissionTTL {
+		return nil, errors.New("queue: AdmissionTTL > 0, 0 <= AdmissionIdleTTL <= AdmissionTTL and Overadmit >= 1 are required")
+	}
+	if opt.AdmissionIdleTTL == 0 {
+		opt.AdmissionIdleTTL = opt.AdmissionTTL
 	}
 	if opt.Now == nil {
 		opt.Now = time.Now
@@ -306,7 +313,7 @@ func (s *Service) claim(ctx context.Context, ev Event, uid uuid.UUID, ticket int
 	cctx, cancel := context.WithTimeout(ctx, scriptTimeout)
 	defer cancel()
 	r, err := s.sc.Run(cctx, redisx.QueueClaim, keys.QueueClaimKeys(ev.ID),
-		ticket, uid.String(), now.UnixMilli(), s.opt.AdmissionTTL.Milliseconds())
+		ticket, uid.String(), now.UnixMilli(), s.opt.AdmissionTTL.Milliseconds(), s.opt.AdmissionIdleTTL.Milliseconds())
 	if err != nil {
 		return resp, err
 	}
@@ -316,9 +323,10 @@ func (s *Service) claim(ctx context.Context, ev Event, uid uuid.UUID, ticket int
 		if err != nil {
 			return resp, fmt.Errorf("queue: claim reply: %w", err)
 		}
-		// The token expires with the admission in q:active (floored to
-		// the second), so every claim of the same admission, including a
-		// re-claim after a restore, reports the same expiry.
+		// The token expires at the admission's hard cap (q:cap, floored to
+		// the second), so every claim of the same admission reports the
+		// same expiry; the idle lease in q:active is renewed by Lease.Touch
+		// and never passes that cap (ADR 0010 addendum).
 		exp := time.UnixMilli(expMS).UTC()
 		if !exp.After(now) {
 			exp = now.Add(s.opt.AdmissionTTL)

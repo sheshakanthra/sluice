@@ -230,7 +230,7 @@ func newHarness(t *testing.T, opts ...hopt) *harness {
 	mustNil(t, err)
 	// Faults wrap the production transport (bounded keep-alive pool), not
 	// http.DefaultTransport, so load tests see the real connection limits.
-	base := payments.NewTransport(pspTimeout)
+	base := payments.NewTransport(pspTimeout, 0)
 	h.flt = &faults{base: base}
 	t.Cleanup(base.CloseIdleConnections)
 	h.psp, err = payments.NewClient(payments.Options{BaseURL: h.mpSrv.URL, PublicURL: h.mpSrv.URL, APIKey: apiKey,

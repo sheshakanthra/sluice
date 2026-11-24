@@ -435,7 +435,7 @@ func TestSoldOut(t *testing.T) {
 		}
 		h, err := e.inv.Hold(e.ctx, e.ev.ID, u.id, uuid.NewString(), inventory.Request{Quantity: 4})
 		mustNil(t, err)
-		mustNil(t, e.inv.Consume(e.ctx, e.ev.ID, h.ID))
+		mustNil(t, e.inv.Consume(e.ctx, e.ev.ID, h.ID, u.id))
 	}
 	if r := e.status(byTicket[3]); r.State != queue.StateAdmitted { // admitted, but too late
 		t.Fatalf("ticket 3: %s", r.State)

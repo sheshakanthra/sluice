@@ -2,6 +2,7 @@ package redisx_test
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -135,16 +136,52 @@ func (f *fixture) holdBest(hid, uid uuid.UUID, qty int) redisx.Reply {
 	return f.run(redisx.HoldBest, f.holdKeys(hid), hid.String(), uid.String(), nowMS, 60_000, qty)
 }
 
+// release runs hold_release without touching the admission (a
+// compensation); releaseFree also frees uid's admission ("" = the hash's uid).
 func (f *fixture) release(hid uuid.UUID) redisx.Reply {
 	f.t.Helper()
+	return f.releaseArgs(hid, "", 0)
+}
+
+func (f *fixture) releaseFree(hid uuid.UUID, uid string) redisx.Reply {
+	f.t.Helper()
+	return f.releaseArgs(hid, uid, 1)
+}
+
+func (f *fixture) releaseArgs(hid uuid.UUID, uid string, free int) redisx.Reply {
+	f.t.Helper()
 	e := f.eid
-	return f.run(redisx.HoldRelease, []string{keys.Hold(e, hid), keys.Holds(e), keys.Holding(e), keys.Avail(e), keys.Ver(e), keys.Sold(e)}, hid.String())
+	return f.run(redisx.HoldRelease, []string{keys.Hold(e, hid), keys.Holds(e), keys.Holding(e), keys.Avail(e), keys.Ver(e),
+		keys.Sold(e), keys.QActive(e)}, hid.String(), uid, free)
 }
 
 func (f *fixture) consume(hid uuid.UUID) redisx.Reply {
 	f.t.Helper()
+	return f.consumeAs(hid, "")
+}
+
+func (f *fixture) consumeAs(hid uuid.UUID, uid string) redisx.Reply {
+	f.t.Helper()
 	e := f.eid
-	return f.run(redisx.HoldConsume, []string{keys.Hold(e, hid), keys.Holds(e), keys.Holding(e), keys.Sold(e), keys.Ver(e), keys.Avail(e)}, hid.String())
+	return f.run(redisx.HoldConsume, []string{keys.Hold(e, hid), keys.Holds(e), keys.Holding(e), keys.Sold(e), keys.Ver(e),
+		keys.Avail(e), keys.QActive(e)}, hid.String(), uid)
+}
+
+// admit puts uid in q:active (an admission that expires far in the future).
+func (f *fixture) admit(uid uuid.UUID) {
+	f.t.Helper()
+	if err := f.rdb.ZAdd(f.ctx, keys.QActive(f.eid), redis.Z{Score: float64(nowMS + 600_000), Member: uid.String()}).Err(); err != nil {
+		f.t.Fatal(err)
+	}
+}
+
+func (f *fixture) active(uid uuid.UUID) bool {
+	f.t.Helper()
+	err := f.rdb.ZScore(f.ctx, keys.QActive(f.eid), uid.String()).Err()
+	if err != nil && !errors.Is(err, redis.Nil) {
+		f.t.Fatal(err)
+	}
+	return err == nil
 }
 
 func (f *fixture) members(key string) []int {
@@ -381,6 +418,92 @@ func TestHoldRelease(t *testing.T) {
 	}
 }
 
+// TestHoldEndFreesAdmission: hold_consume always, and hold_release with
+// free_admission = 1, remove the user from q:active in the same script
+// (ADR 0010 addendum); a compensation (free = 0) keeps it; a user who holds
+// again keeps it; a repeat is a no-op.
+func TestHoldEndFreesAdmission(t *testing.T) {
+	cases := []struct {
+		name      string
+		end       func(f *fixture, hid, uid uuid.UUID) redisx.Reply
+		wantFreed bool
+	}{
+		{"consume (CONFIRMED)", func(f *fixture, hid, _ uuid.UUID) redisx.Reply { return f.consume(hid) }, true},
+		{"consume, explicit uid", func(f *fixture, hid, uid uuid.UUID) redisx.Reply { return f.consumeAs(hid, uid.String()) }, true},
+		{"release, free (FAILED / EXPIRED / user release)", func(f *fixture, hid, _ uuid.UUID) redisx.Reply { return f.releaseFree(hid, "") }, true},
+		{"release, compensation keeps it", func(f *fixture, hid, _ uuid.UUID) redisx.Reply { return f.release(hid) }, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFixture(t)
+			f.load(10, nil, 0)
+			hid, uid, other := uuid.New(), uuid.New(), uuid.New()
+			f.admit(uid)
+			f.admit(other)
+			if r := f.holdSeats(hid, uid, 1, 2); r.Status != "OK" {
+				t.Fatalf("hold: %+v", r)
+			}
+			r := tc.end(f, hid, uid)
+			if r.Status != "OK" {
+				t.Fatalf("end: %+v", r)
+			}
+			freed, err := r.Int(len(r.Fields) - 1)
+			mustNil(t, err)
+			if (freed == 1) != tc.wantFreed || f.active(uid) == tc.wantFreed {
+				t.Fatalf("freed=%d active=%v, want freed %v", freed, f.active(uid), tc.wantFreed)
+			}
+			if !f.active(other) {
+				t.Fatal("another user's admission was touched")
+			}
+			// Idempotent: the repeat finds the hold MISSING and frees nothing new.
+			if r := tc.end(f, hid, uid); r.Status != "MISSING" || r.Fields[0] != "0" {
+				t.Fatalf("repeat: %+v", r)
+			}
+		})
+	}
+
+	t.Run("MISSING hold, known uid", func(t *testing.T) {
+		f := newFixture(t)
+		f.load(10, nil, 0)
+		uid := uuid.New()
+		f.admit(uid)
+		if r := f.releaseFree(uuid.New(), uid.String()); r.Status != "MISSING" || r.Fields[0] != "1" || f.active(uid) {
+			t.Fatalf("got %+v, active=%v", r, f.active(uid))
+		}
+	})
+
+	t.Run("user holds again: admission kept", func(t *testing.T) {
+		f := newFixture(t)
+		f.load(10, nil, 0)
+		old, cur, uid := uuid.New(), uuid.New(), uuid.New()
+		f.admit(uid)
+		f.holdSeats(old, uid, 1)
+		f.release(old) // e.g. a compensation; then the user holds other seats
+		if r := f.holdSeats(cur, uid, 3); r.Status != "OK" {
+			t.Fatalf("re-hold: %+v", r)
+		}
+		// A late mirror of the old hold's end must not free the admission of
+		// a user who is holding again.
+		if r := f.releaseFree(old, uid.String()); r.Status != "MISSING" || r.Fields[0] != "0" || !f.active(uid) {
+			t.Fatalf("late release: %+v active=%v", r, f.active(uid))
+		}
+		if r := f.consumeAs(old, uid.String()); r.Status != "MISSING" || r.Fields[0] != "0" || !f.active(uid) {
+			t.Fatalf("late consume: %+v active=%v", r, f.active(uid))
+		}
+		// When the current hold ends, the admission goes.
+		if r := f.consume(cur); r.Status != "OK" || f.active(uid) {
+			t.Fatalf("consume current: %+v active=%v", r, f.active(uid))
+		}
+	})
+}
+
+func mustNil(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestInventoryLoad(t *testing.T) {
 	f := newFixture(t)
 	// Stale state that the load must wipe.
@@ -444,7 +567,8 @@ func TestInventoryRepair(t *testing.T) {
 	hid, uid := uuid.New(), uuid.New()
 	f.holdSeats(hid, uid, 1, 2)
 	e := f.eid
-	ks := []string{keys.Avail(e), keys.Sold(e), keys.Holds(e), keys.Holding(e), keys.Ver(e)}
+	f.admit(uid)
+	ks := []string{keys.Avail(e), keys.Sold(e), keys.Holds(e), keys.Holding(e), keys.Ver(e), keys.QActive(e)}
 	// Forget hid without touching avail; then 1->A, 3->H, 4->S, 9->A.
 	r := f.run(redisx.InventoryRepair, ks, keys.Prefix(e), 1, hid.String(), 1, "A", 3, "H", 4, "S", 9, "A")
 	if r.Status != "OK" {
@@ -455,6 +579,9 @@ func TestInventoryRepair(t *testing.T) {
 	}
 	if f.isMember(keys.Holding(e), uid.String()) {
 		t.Error("user still holding")
+	}
+	if f.active(uid) {
+		t.Error("forgotten (taken-over) hold kept its user's admission")
 	}
 	if got := f.members(keys.Avail(e)); !slices.Equal(got, []int{0, 1, 5, 6, 7, 8, 9}) {
 		t.Errorf("avail = %v", got)

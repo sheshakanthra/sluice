@@ -87,6 +87,9 @@ func (k *Keyring) Require(missingCode httpx.Code, next http.Handler, auds ...Aud
 			WriteError(w, r, err)
 			return
 		}
+		if c.Audience == AudAdmission && k.touch != nil {
+			k.touch(r.Context(), c)
+		}
 		next.ServeHTTP(w, r.WithContext(WithClaims(r.Context(), c)))
 	})
 }

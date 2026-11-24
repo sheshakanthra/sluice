@@ -1,0 +1,128 @@
+# SLUICE full stack: api1..3, worker, mockpay and the Caddy front door on :8000.
+# Layered on the infra file (same project, same network):
+#   docker compose -f deploy/compose.yml -f deploy/compose.app.yml up -d --wait
+# `task stack:up` does this (plus compose.rush.yml for the swarm). The env
+# profile is deploy/env/${SLUICE_ENV}.env (default rush).
+name: sluice
+
+x-sluice: &sluice
+  image: sluice:local
+  build:
+    context: ..
+    dockerfile: deploy/docker/Dockerfile
+    args:
+      VERSION: ${SLUICE_VERSION:-dev}
+      COMMIT: ${SLUICE_COMMIT:-unknown}
+  env_file:
+    - env/${SLUICE_ENV:-rush}.env
+  environment:
+    # In-network hosts; the env profile carries everything else.
+    DATABASE_URL: postgres://sluice:sluice@postgres:5432/sluice?sslmode=disable
+    MOCKPAY_DATABASE_URL: postgres://sluice:sluice@postgres:5432/mockpay?sslmode=disable
+    REDIS_URL: redis://redis:6379/0
+  restart: unless-stopped
+  stop_grace_period: 15s
+
+x-api: &api
+  <<: *sluice
+  command: ["api"]
+  depends_on:
+    # seed depends on migrate. A one-shot must be some service's dependency,
+    # or `up --wait` reports its exit as a failure.
+    seed:
+      condition: service_completed_successfully
+    redis:
+      condition: service_healthy
+    mockpay:
+      condition: service_healthy
+  healthcheck:
+    # distroless has no shell or curl: the binary probes itself.
+    test: ["CMD", "/usr/local/bin/sluice", "probe", "http://127.0.0.1:8080/readyz"]
+    interval: 2s
+    timeout: 3s
+    retries: 30
+    start_period: 5s
+
+services:
+  # One-shot: goose + River migrations, then the demo events (idempotent).
+  migrate:
+    <<: *sluice
+    command: ["migrate"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  seed:
+    <<: *sluice
+    command: ["seed"]
+    restart: "no"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  api1:
+    <<: *api
+  api2:
+    <<: *api
+  api3:
+    <<: *api
+
+  worker:
+    <<: *sluice
+    command: ["worker"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      mockpay:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/sluice", "probe", "http://127.0.0.1:9091/readyz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  mockpay:
+    <<: *sluice
+    command: ["mockpay"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/sluice", "probe", "http://127.0.0.1:8090/readyz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  caddy:
+    image: caddy:2.11.9
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Static export of the web app (task web:build); an empty dir until P6.
+      - ../web/out:/srv:ro
+    ulimits:
+      nofile:
+        soft: 200000
+        hard: 200000
+    depends_on:
+      api1:
+        condition: service_healthy
+      api2:
+        condition: service_healthy
+      api3:
+        condition: service_healthy
+      mockpay:
+        condition: service_healthy
+    healthcheck:
+      # Through the proxy to an API replica, so "healthy" means routable.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8000/api/v1/healthz"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped

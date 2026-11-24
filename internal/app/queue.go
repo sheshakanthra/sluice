@@ -34,7 +34,8 @@ func newQueueService(cfg *config.Config, log *slog.Logger, reg prometheus.Regist
 		return nil, err
 	}
 	return queue.NewService(sc, keyring, queue.NewCache(sc, nil, log), queue.Options{
-		AdmissionTTL: cfg.AdmissionTTL, Overadmit: cfg.QueueOveradmit, Log: log, Metrics: m, Restorer: restorer,
+		AdmissionTTL: cfg.AdmissionTTL, AdmissionIdleTTL: cfg.AdmissionIdleTTL, Overadmit: cfg.QueueOveradmit, Log: log,
+		Metrics: m, Restorer: restorer,
 	})
 }
 

@@ -33,7 +33,106 @@ func (f *fixture) tick(now int64, maxActive, minAdmit, maxPerTick int) redisx.Re
 
 func (f *fixture) claim(ticket int64, uid uuid.UUID, now int64) redisx.Reply {
 	f.t.Helper()
-	return f.run(redisx.QueueClaim, keys.QueueClaimKeys(f.eid), ticket, uid.String(), now, 600_000)
+	return f.claimIdle(ticket, uid, now, 600_000) // idle = cap: the lease behaves like a fixed TTL
+}
+
+func (f *fixture) claimIdle(ticket int64, uid uuid.UUID, now, idle int64) redisx.Reply {
+	f.t.Helper()
+	return f.run(redisx.QueueClaim, keys.QueueClaimKeys(f.eid), ticket, uid.String(), now, 600_000, idle)
+}
+
+func (f *fixture) touch(uid uuid.UUID, now, idle, capMS int64) redisx.Reply {
+	f.t.Helper()
+	return f.run(redisx.QueueTouch, keys.QueueTouchKeys(f.eid), uid.String(), now, idle, capMS)
+}
+
+func (f *fixture) lease(uid uuid.UUID) (int64, bool) {
+	f.t.Helper()
+	v, err := f.rdb.ZScore(f.ctx, keys.QActive(f.eid), uid.String()).Result()
+	if err != nil {
+		return 0, false
+	}
+	return int64(v), true
+}
+
+// TestAdmissionLease (ADR 0010 addendum): a claim sets the idle lease
+// min(now + idle, cap) in q:active and the hard cap in q:cap; touch renews
+// with ZADD XX GT, never past the cap, never shortening, and never
+// re-creating an admission that ended; the tick drops idle and capped
+// leases and prunes q:cap.
+func TestAdmissionLease(t *testing.T) {
+	const idle, ttl = 60_000, 600_000
+	f := newFixture(t)
+	f.initQueue()
+	f.load(10, nil, 0)
+	users := make([]uuid.UUID, 3)
+	for i := range users {
+		users[i] = uuid.New()
+		f.join(users[i], opensMS, "0", false)
+	}
+	f.tick(opensMS, 100, 1, 10)
+	t0 := int64(opensMS + 10)
+	capMS := t0 + ttl
+	for i, u := range users {
+		if got := reply(f.claimIdle(int64(i+1), u, t0, idle)); got != fmt.Sprintf("[ADMITTED %d 1]", capMS) {
+			t.Fatalf("claim %d = %s (the token carries the hard cap)", i, got)
+		}
+		if l, _ := f.lease(u); l != t0+idle {
+			t.Fatalf("lease %d = %d, want claim + idle %d", i, l, t0+idle)
+		}
+	}
+	if got := reply(f.claimIdle(1, users[0], t0+5, idle)); got != fmt.Sprintf("[ADMITTED %d 0]", capMS) {
+		t.Errorf("re-claim = %s, want the same cap", got)
+	}
+
+	tests := []struct {
+		name    string
+		uid     uuid.UUID
+		now     int64
+		want    string
+		wantExp int64 // 0: not in q:active
+	}{
+		{"renew slides the lease", users[0], t0 + 30_000, "[OK 1]", t0 + 30_000 + idle},
+		{"an older request never shortens it", users[0], t0 + 10_000, "[OK 0]", t0 + 30_000 + idle},
+		{"near the cap the lease stops at the cap", users[0], capMS - 1_000, "[OK 1]", capMS},
+		{"past the cap nothing renews", users[0], capMS + 1, "[OK 0]", capMS},
+		{"a user who never claimed is not created", uuid.New(), t0, "[OK 0]", 0},
+	}
+	for _, tc := range tests {
+		if got := reply(f.touch(tc.uid, tc.now, idle, capMS)); got != tc.want {
+			t.Errorf("%s: touch = %s, want %s", tc.name, got, tc.want)
+		}
+		l, ok := f.lease(tc.uid)
+		if (tc.wantExp == 0 && ok) || (tc.wantExp != 0 && l != tc.wantExp) {
+			t.Errorf("%s: lease = %d (present %v), want %d", tc.name, l, ok, tc.wantExp)
+		}
+	}
+
+	// An admission that ended (left the queue) is never brought back.
+	f.run(redisx.QueueLeave, keys.QueueLeaveKeys(f.eid, users[1]), users[1].String(), 2)
+	if got := reply(f.touch(users[1], t0+1_000, idle, capMS)); got != "[OK 0]" {
+		t.Errorf("touch after leave = %s", got)
+	}
+	if _, ok := f.lease(users[1]); ok {
+		t.Error("touch re-created an admission that had left")
+	}
+
+	// users[2] never renews: the tick at claim + idle drops it; users[0]
+	// (renewed to the cap) stays until the cap, then goes, and q:cap is pruned.
+	f.tick(t0+idle+1, 100, 1, 10)
+	if _, ok := f.lease(users[2]); ok {
+		t.Error("idle admission survived its lease")
+	}
+	if _, ok := f.lease(users[0]); !ok {
+		t.Error("renewed admission dropped before its cap")
+	}
+	f.tick(capMS+1, 100, 1, 10)
+	if _, ok := f.lease(users[0]); ok {
+		t.Error("admission survived its hard cap")
+	}
+	if n := f.rdb.ZCard(f.ctx, keys.QCap(f.eid)).Val(); n != 0 {
+		t.Errorf("q:cap has %d entries after every cap passed", n)
+	}
 }
 
 // initQueue marks the queue counters restored (q:init), as the restorer

@@ -88,11 +88,12 @@ func (q *Queries) GetHoldForUpdate(ctx context.Context, id uuid.UUID) (Hold, err
 }
 
 const getHoldsByIDs = `-- name: GetHoldsByIDs :many
-SELECT id, status, expires_at FROM holds WHERE id = ANY($1::uuid[])
+SELECT id, user_id, status, expires_at FROM holds WHERE id = ANY($1::uuid[])
 `
 
 type GetHoldsByIDsRow struct {
 	ID        uuid.UUID
+	UserID    uuid.UUID
 	Status    HoldStatus
 	ExpiresAt time.Time
 }
@@ -107,7 +108,12 @@ func (q *Queries) GetHoldsByIDs(ctx context.Context, ids []uuid.UUID) ([]GetHold
 	items := []GetHoldsByIDsRow{}
 	for rows.Next() {
 		var i GetHoldsByIDsRow
-		if err := rows.Scan(&i.ID, &i.Status, &i.ExpiresAt); err != nil {
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.Status,
+			&i.ExpiresAt,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -185,7 +191,7 @@ func (q *Queries) InsertHold(ctx context.Context, arg InsertHoldParams) (Hold, e
 }
 
 const listExpiredHolds = `-- name: ListExpiredHolds :many
-SELECT id, event_id, seat_nos, fence, expires_at FROM holds
+SELECT id, event_id, user_id, seat_nos, fence, expires_at FROM holds
 WHERE status IN ('ACTIVE', 'PAYMENT_PENDING') AND expires_at <= $1
 ORDER BY expires_at
 LIMIT $2
@@ -200,6 +206,7 @@ type ListExpiredHoldsParams struct {
 type ListExpiredHoldsRow struct {
 	ID        uuid.UUID
 	EventID   uuid.UUID
+	UserID    uuid.UUID
 	SeatNos   []int32
 	Fence     int64
 	ExpiresAt time.Time
@@ -218,6 +225,7 @@ func (q *Queries) ListExpiredHolds(ctx context.Context, arg ListExpiredHoldsPara
 		if err := rows.Scan(
 			&i.ID,
 			&i.EventID,
+			&i.UserID,
 			&i.SeatNos,
 			&i.Fence,
 			&i.ExpiresAt,

@@ -9,6 +9,10 @@ dotenv: [".env"]
 vars:
   MODULE: github.com/sheshakanthra/sluice
   COMPOSE: docker compose -f deploy/compose.yml
+  # Full stack = infra + app + swarm definitions (one project, one network).
+  STACK: docker compose -f deploy/compose.yml -f deploy/compose.app.yml -f deploy/compose.rush.yml
+  # Env profile for the full stack: deploy/env/<ENV>.env (rush is the only one so far).
+  ENV: '{{.ENV | default "rush"}}'
   VERSION:
     sh: echo "${SLUICE_VERSION:-dev}"
   COMMIT:
@@ -149,11 +153,41 @@ tasks:
     cmds:
       - go run -ldflags "{{.LDFLAGS}}" ./cmd/sluice mockpay
   stack:up:
-    desc: "TODO(P5) full stack behind Caddy on :8000"
-    cmds: ["echo 'TODO(P5) - full stack is not implemented yet' && exit 1"]
+    desc: "Full stack behind Caddy on :8000 (ENV=rush by default): build the image, migrate, seed, 3x api, worker, mockpay, caddy; waits until healthy"
+    env:
+      SLUICE_ENV: "{{.ENV}}"
+      SLUICE_VERSION: "{{.VERSION}}"
+      SLUICE_COMMIT: "{{.COMMIT}}"
+    preconditions:
+      - sh: test -f deploy/env/{{.ENV}}.env
+        msg: "deploy/env/{{.ENV}}.env does not exist (ENV=dev and ENV=demo profiles are not written yet; use ENV=rush)"
+    cmds:
+      - "{{.STACK}} build migrate"
+      - "{{.STACK}} up -d --wait"
+      - "{{.STACK}} ps"
+
   stack:down:
-    desc: "TODO(P5) stop the full stack"
-    cmds: ["echo 'TODO(P5) - full stack is not implemented yet' && exit 1"]
+    desc: "Stop the full stack (volumes kept; task stack:down -- -v also deletes them)"
+    env:
+      SLUICE_ENV: "{{.ENV}}"
+    cmds:
+      - "{{.STACK}} --profile rush down {{.CLI_ARGS}}"
+
+  rush:run:
+    desc: "Ad-hoc swarm run against the running stack: seeds a fresh event, then sluice rush. Vars: USERS (2000), SCENARIO (SMOKE), CONN (pooled), OPENS_IN (30s), SEATS (500), EVENT (rush-<time>)"
+    vars:
+      USERS: '{{.USERS | default "2000"}}'
+      SCENARIO: '{{.SCENARIO | default "SMOKE"}}'
+      CONN: '{{.CONN | default "pooled"}}'
+      OPENS_IN: '{{.OPENS_IN | default "30s"}}'
+      SEATS: '{{.SEATS | default "500"}}'
+      EVENT: '{{.EVENT | default (printf "rush-%s" (now | date "0102-150405"))}}'
+    env:
+      SLUICE_ENV: "{{.ENV}}"
+    cmds:
+      - "{{.STACK}} run --rm -T seed seed --event {{.EVENT}} --capacity {{.SEATS}} --opens-in 30m"
+      - "{{.STACK}} run --rm -T rush --target http://caddy:8000 --event {{.EVENT}} --scenario {{.SCENARIO}} --users {{.USERS}} --conn {{.CONN}} --opens-in {{.OPENS_IN}} {{.CLI_ARGS}}"
+
   rush:smoke:
     desc: "TODO(P5) 5k-user smoke rush + audit"
     cmds: ["echo 'TODO(P5) - rush is not implemented yet' && exit 1"]

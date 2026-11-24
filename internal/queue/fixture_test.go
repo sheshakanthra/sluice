@@ -73,7 +73,8 @@ type envConfig struct {
 	capacity  int
 	opensIn   time.Duration // sale_opens_at relative to the env's start
 	tick      queue.TickConfig
-	realClock bool // controller uses time.Now (concurrent-controller test)
+	realClock bool          // controller uses time.Now (concurrent-controller test)
+	idle      time.Duration // ADMISSION_IDLE_TTL (0: same as the 10 min ADMISSION_TTL)
 }
 
 type envOpt func(*envConfig)
@@ -82,6 +83,11 @@ func capacity(n int) envOpt             { return func(c *envConfig) { c.capacity
 func opensIn(d time.Duration) envOpt    { return func(c *envConfig) { c.opensIn = d } }
 func tickCfg(t queue.TickConfig) envOpt { return func(c *envConfig) { c.tick = t } }
 func realClock() envOpt                 { return func(c *envConfig) { c.realClock = true } }
+func idleTTL(d time.Duration) envOpt    { return func(c *envConfig) { c.idle = d } }
+
+// admissionTTL is the env's ADMISSION_TTL (the hard cap).
+const admissionTTL = 10 * time.Minute
+
 func defaultTick() queue.TickConfig {
 	return queue.TickConfig{MaxActive: 1000, Overadmit: 1.5, MinAdmit: 10, MaxPerTick: 200, OfferTTL: time.Minute}
 }
@@ -106,6 +112,7 @@ type env struct {
 	restorer *queue.Restorer
 	snapper  *queue.Snapshotter
 	wm       *queue.WorkerMetrics
+	lease    *queue.Lease // renews admission leases on the fake clock
 }
 
 func mustNil(t testing.TB, err error) {
@@ -159,9 +166,15 @@ func newEnv(t *testing.T, opts ...envOpt) *env {
 	e.snapper, err = queue.NewSnapshotter(e.q, sc, clk.Now, nil, e.wm)
 	mustNil(t, err)
 	e.svc, err = queue.NewService(sc, kr, queue.NewCache(sc, clk.Now, nil), queue.Options{
-		AdmissionTTL: 10 * time.Minute, Overadmit: cfg.tick.Overadmit, Now: clk.Now, Metrics: qm,
+		AdmissionTTL: admissionTTL, AdmissionIdleTTL: cfg.idle, Overadmit: cfg.tick.Overadmit, Now: clk.Now, Metrics: qm,
 		Restorer: e.restorer,
 	})
+	mustNil(t, err)
+	idle := cfg.idle
+	if idle == 0 {
+		idle = admissionTTL
+	}
+	e.lease, err = queue.NewLease(sc, idle, clk.Now, nil, reg)
 	mustNil(t, err)
 	ticker, err := queue.NewTicker(sc, cfg.tick)
 	mustNil(t, err)

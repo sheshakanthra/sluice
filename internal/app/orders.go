@@ -24,7 +24,8 @@ func newOrders(cfg *config.Config, log *slog.Logger, reg prometheus.Registerer, 
 		return nil, err
 	}
 	psp, err := payments.NewClient(payments.Options{
-		BaseURL: cfg.MockpayURL, PublicURL: cfg.MockpayPublicURL, APIKey: cfg.MockpayAPIKey, Metrics: pm,
+		BaseURL: cfg.MockpayURL, PublicURL: cfg.MockpayPublicURL, APIKey: cfg.MockpayAPIKey, MaxConns: cfg.PSPMaxConns,
+		Metrics: pm,
 	})
 	if err != nil {
 		return nil, err

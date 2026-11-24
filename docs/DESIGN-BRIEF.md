@@ -70,6 +70,7 @@ Seat states must **not rely on colour alone**:
 6. **IST everywhere**, with the date (for example "10:00:00 IST, Sat 22 Nov"). Use ₹ with Indian digit grouping (₹1,25,000).
 7. **Polling** follows the server's `retry_after_ms`. Keep polling in background tabs (people switch apps), but use the server-advised interval only, never faster.
 8. **Motion is meaningful only:** position ticks, a seat flips state, the timer is urgent. Respect `prefers-reduced-motion`.
+9. **Give the slot back.** When an admitted user ends without seats, the UI calls `DELETE /events/{id}/queue` with the admission token, the same exit rule the swarm follows (LOADTEST §3.2). That covers no seats left after the retries, "all seats are on hold" (`INSUFFICIENT_SEATS` with 0 available), and "Leave"/"Cancel" from the seat map or the hold (ABANDONED). The copy says so ("We've given your place to the next person"). The server also frees an idle admission after `ADMISSION_IDLE_TTL` (ADR 0010 addendum), but the explicit call frees it at once and doesn't rely on that.
 
 ## 6. Accessibility (WCAG 2.2 AA)
 - The seat map is a `grid` with roving tabindex and arrow-key navigation. Each seat's aria-label reads like "Coach 3, seat 27, window, available". Enter or Space toggles a seat, and a live region announces changes to the selection.

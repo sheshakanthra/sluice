@@ -104,6 +104,7 @@ type Config struct {
 	HoldTTL              time.Duration
 	PaymentHoldTTL       time.Duration
 	AdmissionTTL         time.Duration
+	AdmissionIdleTTL     time.Duration // sliding lease; ADMISSION_TTL stays the hard cap
 	OfferClaimTTL        time.Duration
 	QueueTick            time.Duration
 	QueueMaxActive       int
@@ -120,6 +121,7 @@ type Config struct {
 	MockpayURL                    string
 	MockpayPublicURL              string
 	MockpayAPIKey                 string
+	PSPMaxConns                   int // PSP client connection pool bound
 	MockpayWebhookSecret          string
 	PublicWebhookURL              string
 	PublicAppURL                  string
@@ -168,6 +170,7 @@ func Load(lookup LookupFunc) (*Config, error) {
 	c.HoldTTL = r.duration("HOLD_TTL", "5m")
 	c.PaymentHoldTTL = r.duration("PAYMENT_HOLD_TTL", "10m")
 	c.AdmissionTTL = r.duration("ADMISSION_TTL", "10m")
+	c.AdmissionIdleTTL = r.duration("ADMISSION_IDLE_TTL", "2m")
 	c.OfferClaimTTL = r.duration("OFFER_CLAIM_TTL", "60s")
 	c.QueueTick = r.duration("QUEUE_TICK", "100ms")
 	c.QueueMaxActive = r.intIn("QUEUE_MAX_ACTIVE", 1000, 1, 1_000_000)
@@ -184,6 +187,7 @@ func Load(lookup LookupFunc) (*Config, error) {
 	c.MockpayURL = r.url("MOCKPAY_URL", "http://localhost:8090", "http", "https")
 	c.MockpayPublicURL = r.url("MOCKPAY_PUBLIC_URL", "http://localhost:8090", "http", "https")
 	c.MockpayAPIKey = r.secret("MOCKPAY_API_KEY", "dev-mockpay-key", 8)
+	c.PSPMaxConns = r.intIn("PSP_MAX_CONNS", 64, 1, 4096)
 	c.MockpayWebhookSecret = r.secret("MOCKPAY_WEBHOOK_SECRET", "dev-webhook-secret", 8)
 	c.PublicWebhookURL = r.url("PUBLIC_WEBHOOK_URL", "http://localhost:8080/api/v1/webhooks/mockpay", "http", "https")
 	c.PublicAppURL = r.url("PUBLIC_APP_URL", "http://localhost:3000", "http", "https")
@@ -227,6 +231,9 @@ func (c *Config) validate(r *reader) {
 		if c.AdminToken == defaultAdminToken {
 			r.fail("ADMIN_TOKEN", errors.New("the dev token must not be used when APP_ENV=demo"))
 		}
+	}
+	if c.AdmissionIdleTTL <= 0 || c.AdmissionIdleTTL > c.AdmissionTTL {
+		r.fail("ADMISSION_IDLE_TTL", fmt.Errorf("must be > 0 and <= ADMISSION_TTL (%s, %s)", c.AdmissionIdleTTL, c.AdmissionTTL))
 	}
 	if c.PaymentHoldTTL < c.HoldTTL {
 		r.fail("PAYMENT_HOLD_TTL", fmt.Errorf("must be >= HOLD_TTL (%s < %s)", c.PaymentHoldTTL, c.HoldTTL))

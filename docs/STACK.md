@@ -48,7 +48,8 @@ Source commands: `go version`, `node -v`, `pnpm -v`, `task --version`, `golangci
 | Postgres image | `postgres:18.7` | `deploy/compose.yml`, `internal/app/api_integration_test.go` |
 | Redis image | `redis:8.10.3` | `deploy/compose.yml`, `internal/app/api_integration_test.go` |
 | Prometheus / Grafana | `prom/prometheus:v3.16.0` / `grafana/grafana:13.3.1` | `deploy/compose.yml` |
-| Caddy / Toxiproxy / k6 | not added yet (Caddy P5, k6 P5, Toxiproxy P7); latest Caddy tag seen in P0: `caddy:2.11.9` | compose files (later phases) |
+| Caddy / Toxiproxy / k6 | `caddy:2.11.9` (P5); k6 later in P5, Toxiproxy P7 | `deploy/compose.app.yml` |
+| Build / runtime images | `golang:1.27.4` (build stage) / `gcr.io/distroless/static-debian12:nonroot` | `deploy/docker/Dockerfile` |
 | pgx / go-redis / client_golang / uuid / golang-jwt | pgx v5.13.0 / go-redis v9.23.0 / client_golang v1.25.0 / uuid v1.6.0 / golang-jwt/jwt/v5 v5.3.1 (P2) | `go.mod` |
 | testcontainers-go | v0.45.0 (+ modules/postgres, modules/redis v0.45.0) | `go.mod` |
 | River / goose / sqlc / rapid | River v0.51.2 (`river`, `riverdriver/riverpgxv5`; migrator only until P3) / goose v3.30.1 / sqlc 1.31.1 via the `sqlc/sqlc:1.31.1` Docker image (ADR 0005) / rapid v1.3.0 | `go.mod`, Taskfile (`SQLC_IMAGE`) |
@@ -65,7 +66,7 @@ sluice/
 ├── .claude/settings.json      # git guardrails (deny rules)
 ├── .gitignore  .gitattributes  .editorconfig  .env.example
 ├── go.mod  go.sum
-├── cmd/sluice/main.go         # subcommands: api|worker|mockpay|migrate|seed|rush|audit|version
+├── cmd/sluice/main.go         # subcommands: api|worker|mockpay|migrate|seed|rush|audit|probe|version (probe = distroless healthcheck, ADR 0010)
 ├── internal/
 │   ├── app/                   # wiring per subcommand
 │   ├── config/                # env parsing + validation (fail fast)
@@ -105,8 +106,8 @@ sluice/
 │   └── results/               # raw runs (gitignored); curated copies go to docs/results/
 ├── deploy/
 │   ├── compose.yml            # infra: postgres, redis, prometheus, grafana
-│   ├── compose.app.yml        # api1..3, worker, mockpay, caddy (+ web static volume)
-│   ├── compose.rush.yml       # swarm container (sysctls, ulimits)
+│   ├── compose.app.yml        # migrate + seed one-shots, api1..3, worker, mockpay, caddy (+ web static volume)
+│   ├── compose.rush.yml       # swarm container (profile rush; sysctls, ulimits, results volume)
 │   ├── compose.chaos.yml      # toxiproxy wiring
 │   ├── env/                   # rush.env, demo.env.example (no real secrets)
 │   ├── docker/Dockerfile      # multi-stage → distroless static image with the sluice binary
@@ -151,11 +152,12 @@ sluice/
 | `TOKEN_KEYS` | `dev1:<base64 32 bytes>` | | `kid:secret,...`; the first one signs, all of them verify |
 | `ADMIN_TOKEN` | `dev-admin-token-change-me` | | Bearer token for `/admin/*` |
 | `CORS_ORIGINS` | `http://localhost:3000` | | Comma-separated |
-| `TRUSTED_PROXIES` | `127.0.0.1/32,172.16.0.0/12` | | CIDRs allowed to set `X-Forwarded-For` |
+| `TRUSTED_PROXIES` | `127.0.0.1/32,172.16.0.0/12` | `127.0.0.1/32,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16` | CIDRs allowed to set `X-Forwarded-For`. Rush trusts every private range so Caddy is trusted on any Docker subnet (ADR 0010) |
 | `RATE_LIMITS_ENABLED` | `true` | `true` | Swarm sends synthetic XFF from a trusted proxy |
 | `HOLD_TTL` | `5m` | `60s` | |
 | `PAYMENT_HOLD_TTL` | `10m` | `90s` | Hold TTL after an order is created |
-| `ADMISSION_TTL` | `10m` | `3m` | |
+| `ADMISSION_TTL` | `10m` | `3m` | Hard cap of an admission (the admission token's `exp`) |
+| `ADMISSION_IDLE_TTL` | `2m` | `60s` | Sliding idle lease, renewed by every request with the admission token; `<= ADMISSION_TTL` (ADR 0010 addendum) |
 | `OFFER_CLAIM_TTL` | `60s` | `30s` | |
 | `QUEUE_TICK` | `100ms` | | |
 | `QUEUE_MAX_ACTIVE` | `1000` | | Hard cap on admitted-and-seeking users |
@@ -171,6 +173,7 @@ sluice/
 | `MOCKPAY_URL` | `http://localhost:8090` | `http://mockpay:8090` | Server-to-server |
 | `MOCKPAY_PUBLIC_URL` | `http://localhost:8090` | `http://localhost:8000/pay` | What browsers see |
 | `MOCKPAY_API_KEY` | `dev-mockpay-key` | | |
+| `PSP_MAX_CONNS` | `64` | `64` | PSP client connection pool bound per api/worker process; `psp_conn_wait_seconds` shows queueing |
 | `MOCKPAY_WEBHOOK_SECRET` | `dev-webhook-secret` | | |
 | `PUBLIC_WEBHOOK_URL` | `http://localhost:8080/api/v1/webhooks/mockpay` | `http://caddy:8000/api/v1/webhooks/mockpay` | Where MockPay delivers |
 | `PUBLIC_APP_URL` | `http://localhost:3000` | `http://localhost:8000` | Web app origin; the hosted checkout returns to `<PUBLIC_APP_URL>/order?o=<order_id>` (ADR 0007) |

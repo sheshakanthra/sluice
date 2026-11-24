@@ -1,0 +1,39 @@
+# SLUICE front door (:8000): /api/* -> api1..3, /pay/* -> mockpay, else the static web app.
+{
+	admin off
+	servers {
+		# The swarm (and any peer on the compose network) sends a synthetic
+		# X-Forwarded-For; Caddy keeps it and appends the peer, so the API's
+		# right-most-untrusted rule sees the synthetic client IP.
+		trusted_proxies static private_ranges
+	}
+}
+
+:8000 {
+	handle /api/* {
+		reverse_proxy api1:8080 api2:8080 api3:8080 {
+			lb_policy least_conn
+			# Active health check: a replica that fails /readyz gets no traffic.
+			health_uri /readyz
+			health_interval 2s
+			health_timeout 2s
+			health_status 2xx
+			# Passive: a replica that refuses connections is skipped for 5 s.
+			fail_duration 5s
+			transport http {
+				keepalive 2m
+				keepalive_idle_conns_per_host 1024
+			}
+		}
+	}
+
+	handle_path /pay/* {
+		reverse_proxy mockpay:8090
+	}
+
+	handle {
+		root * /srv
+		try_files {path} {path}.html {path}/index.html /index.html
+		file_server
+	}
+}

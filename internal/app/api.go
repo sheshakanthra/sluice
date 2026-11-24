@@ -83,6 +83,13 @@ func APIHandler(ctx context.Context, d Deps) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Every request with an admission token renews its idle lease (ADR 0010
+	// addendum); routes registered below use this keyring.
+	lease, err := queue.NewLease(sc, d.Config.AdmissionIdleTTL, nil, d.Log, d.Registry)
+	if err != nil {
+		return nil, err
+	}
+	keyring = keyring.WithAdmissionTouch(lease.Touch)
 	var ord *orders.Service // the reclaim hook needs the orders service, which needs inventory
 	inv, err := newInventory(d.Config, d.Log, d.Registry, d.PG, d.Redis, sc,
 		func(ctx context.Context, tx pgx.Tx, hid uuid.UUID) error { return ord.OnReclaim(ctx, tx, hid) })

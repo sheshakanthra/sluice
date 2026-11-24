@@ -123,7 +123,7 @@ func (s *Service) reclaimExpired(ctx context.Context) (SweepResult, error) {
 		}
 		if !s.pgOnly {
 			for _, h := range reclaimed {
-				if _, err := s.sc.Run(ctx, redisx.HoldRelease, releaseKeys(h.EventID, h.ID), h.ID.String()); err != nil {
+				if err := s.releaseRedis(ctx, h.EventID, h.ID, h.UserID, freeAdmission); err != nil {
 					// The Redis pass of a later sweep releases it.
 					s.log.WarnContext(ctx, "redis release of reclaimed hold", slog.String("error", err.Error()))
 				}
@@ -170,11 +170,14 @@ func (s *Service) sweepRedis(ctx context.Context, eventID uuid.UUID, res *SweepR
 	for _, hid := range hids {
 		r, ok := pg[hid]
 		switch {
-		case !ok || r.Status == gen.HoldStatusEXPIRED || r.Status == gen.HoldStatusRELEASED:
-			_, err = s.sc.Run(ctx, redisx.HoldRelease, releaseKeys(eventID, hid), hid.String())
+		case !ok: // a grant PG never committed (compensated): its user is still shopping
+			err = s.releaseRedis(ctx, eventID, hid, uuid.Nil, keepAdmission)
+			res.RedisReleased++
+		case r.Status == gen.HoldStatusEXPIRED || r.Status == gen.HoldStatusRELEASED:
+			err = s.releaseRedis(ctx, eventID, hid, r.UserID, freeAdmission)
 			res.RedisReleased++
 		case r.Status == gen.HoldStatusCONSUMED:
-			_, err = s.sc.Run(ctx, redisx.HoldConsume, consumeKeys(eventID, hid), hid.String())
+			err = s.consumeRedis(ctx, eventID, hid, r.UserID)
 			res.RedisConsumed++
 		case r.ExpiresAt.After(now):
 			_, err = s.sc.Run(ctx, redisx.HoldExtend, extendKeys(eventID, hid), hid.String(), r.ExpiresAt.UnixMilli())

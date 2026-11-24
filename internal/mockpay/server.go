@@ -28,6 +28,7 @@ import (
 	"github.com/sheshakanthra/sluice/internal/httpx"
 	"github.com/sheshakanthra/sluice/internal/mockpay/mpdb"
 	"github.com/sheshakanthra/sluice/internal/obs"
+	"github.com/sheshakanthra/sluice/internal/payments"
 )
 
 //go:embed migrations/*.sql
@@ -106,6 +107,9 @@ type Metrics struct {
 	ledger     *prometheus.CounterVec
 	deliveries *prometheus.CounterVec
 	faults     *prometheus.CounterVec
+	// duration is the server-side view of each API call (handler time,
+	// including the injected MOCKPAY_LATENCY_MS), by the client's op names.
+	duration *prometheus.HistogramVec
 }
 
 func newMetrics(reg prometheus.Registerer) (*Metrics, error) {
@@ -122,8 +126,12 @@ func newMetrics(reg prometheus.Registerer) (*Metrics, error) {
 		faults: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "mockpay_faults_total", Help: "Injected faults by kind.",
 		}, []string{"fault"}),
+		duration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+			Name: "mockpay_request_duration_seconds", Help: "MockPay API handler latency (server side), by operation.",
+			Buckets: []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2, 4},
+		}, []string{"op"}),
 	}
-	for _, c := range []prometheus.Collector{m.requests, m.ledger, m.deliveries, m.faults} {
+	for _, c := range []prometheus.Collector{m.requests, m.ledger, m.deliveries, m.faults, m.duration} {
 		if err := reg.Register(c); err != nil {
 			return nil, fmt.Errorf("mockpay metrics: %w", err)
 		}
@@ -188,18 +196,27 @@ func (s *Server) Handler() http.Handler {
 	rt := httpx.NewRouter()
 	httpx.RegisterHealth(rt, s.o.Log, httpx.Check{Name: "postgres", Ping: s.pool.Ping})
 	rt.Handle("GET /metrics", obs.MetricsHandler(s.reg))
-	api := func(pattern string, h http.HandlerFunc) { rt.Handle(pattern, s.requireKey(h)) }
-	api("POST /v1/intents", s.handleCreate)
-	api("GET /v1/intents", s.handleList)
-	api("GET /v1/intents/{id}", s.handleGet)
-	api("POST /v1/intents/{id}/confirm", s.handleOp(opConfirm))
-	api("POST /v1/intents/{id}/capture", s.handleOp(opCapture))
-	api("POST /v1/intents/{id}/void", s.handleOp(opVoid))
-	api("POST /v1/intents/{id}/refund", s.handleOp(opRefund))
-	api("GET /v1/ledger/summary", s.handleLedgerSummary)
+	api := func(op, pattern string, h http.HandlerFunc) { rt.Handle(pattern, s.timed(op, s.requireKey(h))) }
+	api(payments.OpCreate, "POST /v1/intents", s.handleCreate)
+	api(payments.OpList, "GET /v1/intents", s.handleList)
+	api(payments.OpGet, "GET /v1/intents/{id}", s.handleGet)
+	api(payments.OpConfirm, "POST /v1/intents/{id}/confirm", s.handleOp(opConfirm))
+	api(payments.OpCapture, "POST /v1/intents/{id}/capture", s.handleOp(opCapture))
+	api(payments.OpVoid, "POST /v1/intents/{id}/void", s.handleOp(opVoid))
+	api(payments.OpRefund, "POST /v1/intents/{id}/refund", s.handleOp(opRefund))
+	api(payments.OpLedger, "GET /v1/ledger/summary", s.handleLedgerSummary)
 	rt.HandleFunc("GET /checkout/{id}", s.handleCheckoutPage)
 	rt.HandleFunc("POST /checkout/{id}/pay", s.handleCheckoutPay)
 	return httpx.Chain(rt, httpx.Recover(s.o.Log))
+}
+
+// timed observes mockpay_request_duration_seconds{op} for every API call.
+func (s *Server) timed(op string, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		next.ServeHTTP(w, r)
+		s.metrics.duration.WithLabelValues(op).Observe(time.Since(start).Seconds())
+	})
 }
 
 // requireKey checks `Authorization: Bearer <MOCKPAY_API_KEY>` in constant time.

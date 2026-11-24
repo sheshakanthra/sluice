@@ -1,7 +1,7 @@
 -- queue_tick.lua: one admission-controller step (ARCHITECTURE §5).
 -- KEYS: 1 meta, 2 avail, 3 holds, 4 holding, 5 q:pre, 6 q:presize, 7 q:tail,
 --       8 q:cursor, 9 q:offers, 10 q:active, 11 q:soldout, 12 q:rate,
---       13 q:rate_at, 14 q:init, 15 q:opens
+--       13 q:rate_at, 14 q:init, 15 q:opens, 16 q:cap
 -- ARGV: now_ms, sale_opens_ms, max_active, overadmit, min_admit,
 --       max_per_tick, offer_ttl_ms, rate_tau_ms
 -- Returns {'NOT_INIT'} | {'NOT_LOADED'} | {'PREQUEUE'} | {'SOLD_OUT'} | {'PAUSED'} |
@@ -31,7 +31,8 @@ if redis.call('EXISTS', KEYS[6]) == 0 then
 end
 
 local expired = redis.call('ZREMRANGEBYSCORE', KEYS[9], '-inf', now)
-redis.call('ZREMRANGEBYSCORE', KEYS[10], '-inf', now)
+redis.call('ZREMRANGEBYSCORE', KEYS[10], '-inf', now) -- idle leases and hard caps end here
+redis.call('ZREMRANGEBYSCORE', KEYS[16], '-inf', now)  -- caps outlive leases at most until the cap
 if redis.call('GET', KEYS[11]) == '1' then return {'SOLD_OUT'} end
 
 local avail = redis.call('SCARD', KEYS[2])
