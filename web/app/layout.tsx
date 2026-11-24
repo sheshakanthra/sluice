@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Barlow, Barlow_Condensed } from "next/font/google";
 import "./globals.css";
+import { Providers } from "@/components/providers";
 import { cn } from "@/lib/utils";
 
 // Body: Barlow. Display + every numeral: Barlow Condensed.
@@ -33,7 +34,9 @@ export const viewport: Viewport = {
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
     <html lang="en-IN" className={cn("h-full antialiased", barlow.variable, barlowCondensed.variable)}>
-      <body className="flex min-h-full flex-col">{children}</body>
+      <body className="flex min-h-full flex-col">
+        <Providers>{children}</Providers>
+      </body>
     </html>
   );
 }

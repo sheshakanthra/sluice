@@ -224,3 +224,11 @@
     scroll-behavior: auto !important;
   }
 }
+
+@layer components {
+  /* "Held by others": diagonal hatch, so the state never relies on colour (DESIGN-BRIEF §4). */
+  .seat-hatch {
+    background-color: var(--sunk);
+    background-image: repeating-linear-gradient(135deg, var(--rule-strong) 0 1.5px, transparent 1.5px 6px);
+  }
+}
