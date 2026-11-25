@@ -232,3 +232,42 @@
     background-image: repeating-linear-gradient(135deg, var(--rule-strong) 0 1.5px, transparent 1.5px 6px);
   }
 }
+
+/* Replay timeline (TimelineScrubber): a native range input drawn as a platform
+   track. The track itself is the div behind it; the thumb is a 24 px navy stop
+   with a white ring (3:1 against the track), focus shows the navy outline. */
+@layer components {
+  .scrubber::-webkit-slider-runnable-track {
+    height: 32px;
+    background: transparent;
+  }
+  .scrubber::-moz-range-track {
+    height: 32px;
+    background: transparent;
+  }
+  .scrubber::-webkit-slider-thumb {
+    appearance: none;
+    margin-top: 4px;
+    width: 24px;
+    height: 24px;
+    border-radius: 9999px;
+    background: var(--navy);
+    border: 3px solid var(--card);
+    box-shadow: 0 0 0 1px var(--navy);
+    cursor: grab;
+  }
+  .scrubber::-moz-range-thumb {
+    width: 24px;
+    height: 24px;
+    border-radius: 9999px;
+    background: var(--navy);
+    border: 3px solid var(--card);
+    box-shadow: 0 0 0 1px var(--navy);
+    cursor: grab;
+  }
+  .scrubber:focus-visible {
+    outline: 2px solid var(--navy);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
+}

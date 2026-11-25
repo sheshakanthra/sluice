@@ -6,6 +6,8 @@ deploy/env/*.env
 !deploy/env/rush.env
 # Scenario overlays (LOADTEST §4): QUEUE_ENFORCED / BASELINE only, no secrets.
 !deploy/env/rush.b[0-2].env
+# E2E overlay for E3 (short hold TTLs), no secrets.
+!deploy/env/rush.e3.env
 
 # --- Go ---
 /bin/
@@ -51,3 +53,6 @@ Thumbs.db
 .vscode/*
 !.vscode/extensions.json
 *.swp
+
+web/e2e/artifacts/
+docs/results/p6b/*.json

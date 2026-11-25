@@ -1,0 +1,157 @@
+{
+  "source": {
+    "kind": "local",
+    "run_id": "p5b-smoke",
+    "git_sha": "570aefc",
+    "scenario": "SMOKE",
+    "started_at": "2026-11-24T13:27:05.828962482Z",
+    "from": "docs/results/p5b/p5b-smoke",
+    "note": "Local SMOKE run (P5b), a placeholder until the CI headline run replaces it in P8"
+  },
+  "runs": [
+    {
+      "run_id": "p5b-b0",
+      "scenario": "B0",
+      "from": "docs/results/p5b/p5b-b0",
+      "users": 10000,
+      "seats": 500,
+      "queue": false,
+      "git_sha": "570aefc",
+      "tickets": 450,
+      "unresolved": 0,
+      "seats_sold": 0,
+      "audit": {
+        "mode": "naive",
+        "oversold": 17,
+        "duplicate_charges": 19,
+        "orphan_charges": 0,
+        "passed": false,
+        "exit_code": 1
+      },
+      "checkout_p95_ms": 57,
+      "error_rate": 0.0004211117349803481,
+      "peak_rps": 4332,
+      "peak_in_system": 8007
+    },
+    {
+      "run_id": "p5b-b1",
+      "scenario": "B1",
+      "from": "docs/results/p5b/p5b-b1",
+      "users": 10000,
+      "seats": 500,
+      "queue": false,
+      "git_sha": "570aefc",
+      "tickets": 344,
+      "unresolved": 0,
+      "seats_sold": 447,
+      "audit": {
+        "mode": "normal",
+        "oversold": 0,
+        "duplicate_charges": 27,
+        "orphan_charges": 0,
+        "passed": false,
+        "exit_code": 1
+      },
+      "checkout_p95_ms": 322,
+      "error_rate": 0.0005419828233135996,
+      "peak_rps": 3651,
+      "peak_in_system": 7449
+    },
+    {
+      "run_id": "p5b-b2",
+      "scenario": "B2",
+      "from": "docs/results/p5b/p5b-b2",
+      "users": 10000,
+      "seats": 500,
+      "queue": false,
+      "git_sha": "570aefc",
+      "tickets": 341,
+      "unresolved": 0,
+      "seats_sold": 451,
+      "audit": {
+        "mode": "normal",
+        "oversold": 0,
+        "duplicate_charges": 0,
+        "orphan_charges": 0,
+        "passed": true,
+        "exit_code": 0
+      },
+      "checkout_p95_ms": 266.8,
+      "error_rate": 0,
+      "peak_rps": 3702,
+      "peak_in_system": 7425
+    },
+    {
+      "run_id": "p5b-smoke",
+      "scenario": "SMOKE",
+      "from": "docs/results/p5b/p5b-smoke",
+      "users": 5000,
+      "seats": 500,
+      "queue": true,
+      "git_sha": "570aefc",
+      "tickets": 376,
+      "unresolved": 0,
+      "seats_sold": 500,
+      "audit": {
+        "mode": "normal",
+        "oversold": 0,
+        "duplicate_charges": 0,
+        "orphan_charges": 0,
+        "passed": true,
+        "exit_code": 0
+      },
+      "checkout_p95_ms": 329.7,
+      "error_rate": 0,
+      "peak_rps": 7001,
+      "peak_in_system": 4253
+    },
+    {
+      "run_id": "p5b-b2-20k",
+      "scenario": "B2",
+      "from": "docs/results/p5b/p5b-b2-20k",
+      "users": 20000,
+      "seats": 500,
+      "queue": false,
+      "git_sha": "570aefc",
+      "tickets": 370,
+      "unresolved": 4,
+      "seats_sold": 460,
+      "audit": {
+        "mode": "normal",
+        "oversold": 0,
+        "duplicate_charges": 0,
+        "orphan_charges": 0,
+        "passed": false,
+        "exit_code": 1
+      },
+      "checkout_p95_ms": 5103.6,
+      "error_rate": 0.5727887923827627,
+      "peak_rps": 13296,
+      "peak_in_system": 14984
+    },
+    {
+      "run_id": "p5b-b2-50k",
+      "scenario": "B2",
+      "from": "docs/results/p5b/p5b-b2-50k",
+      "users": 50000,
+      "seats": 500,
+      "queue": false,
+      "git_sha": "570aefc",
+      "tickets": 375,
+      "unresolved": 4,
+      "seats_sold": 482,
+      "audit": {
+        "mode": "normal",
+        "oversold": 0,
+        "duplicate_charges": 0,
+        "orphan_charges": 0,
+        "passed": false,
+        "exit_code": 1
+      },
+      "checkout_p95_ms": 21446.7,
+      "error_rate": 0.5735100029599708,
+      "peak_rps": 7764,
+      "peak_in_system": 33510
+    }
+  ]
+}

@@ -1,10 +1,13 @@
 import { ArrowRight, ArrowUpRight, Info } from "lucide-react";
+import Link from "next/link";
 
-import { Perforation, PerforationVertical, SignalDot, TicketStub } from "@/components/ticket-stub";
+import { EventCards, ResultStrip } from "@/components/landing-parts";
+import { SiteHeader } from "@/components/site-header";
+import { Perforation, PerforationVertical, TicketStub } from "@/components/ticket-stub";
 
-// P0 landing page. It proves the direction (Swiss transit signage, light, with
-// the ticket stub as the signature element) end to end; P6 builds the real
-// routes on top of the same tokens and components.
+// Landing (DESIGN-BRIEF §3): the pitch, the two events, "how it survives a
+// rush" in four stops, the latest recorded result (labelled with its run) and
+// the way into Rush Control. Static: the live parts are client islands.
 
 const stops = [
   {
@@ -35,7 +38,7 @@ const focusRing =
 export default function Home() {
   return (
     <>
-      <SignBand />
+      <SiteHeader nav />
 
       <main className="flex flex-1 flex-col">
         <section
@@ -65,19 +68,19 @@ export default function Home() {
             </div>
 
             <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
-              <a
-                href="#route"
-                className={`group inline-flex h-12 cursor-pointer items-center justify-center gap-2 rounded-md bg-primary px-6 text-base font-semibold text-primary-foreground transition-colors duration-150 hover:bg-accent-strong-hover active:translate-y-px ${focusRing}`}
+              <Link
+                href="/control/"
+                className={`group inline-flex h-12 cursor-pointer items-center justify-center gap-2 rounded-sm bg-primary px-6 text-base font-semibold text-primary-foreground transition-colors duration-150 hover:bg-accent-strong-hover active:translate-y-px ${focusRing}`}
               >
-                See how it holds up
+                Open Rush Control
                 <ArrowRight
                   aria-hidden="true"
                   className="size-4 transition-transform duration-150 group-hover:translate-x-0.5"
                 />
-              </a>
+              </Link>
               <a
                 href="https://github.com/sheshakanthra/sluice"
-                className={`inline-flex h-12 cursor-pointer items-center justify-center gap-2 rounded-md border border-rule-strong bg-card px-6 text-base font-semibold text-navy transition-colors duration-150 hover:border-navy hover:bg-sunk active:translate-y-px ${focusRing}`}
+                className={`inline-flex h-12 cursor-pointer items-center justify-center gap-2 rounded-sm border border-rule-strong bg-card px-6 text-base font-semibold text-navy transition-colors duration-150 hover:border-navy hover:bg-sunk active:translate-y-px ${focusRing}`}
               >
                 Source on GitHub
                 <ArrowUpRight aria-hidden="true" className="size-4" />
@@ -88,36 +91,23 @@ export default function Home() {
           <RushTicket />
         </section>
 
+        <ResultStrip />
+        <EventCards />
         <RouteMap />
       </main>
 
       <footer className="border-t border-rule bg-card">
         <div className="mx-auto flex w-full max-w-6xl flex-col gap-2 px-4 py-8 text-sm leading-5 text-ink-subtle sm:flex-row sm:items-center sm:justify-between sm:px-8">
           <p>All names in the demo are fictional. MockPay is a simulator: no real money moves.</p>
-          <p>MIT licensed · built in public</p>
+          <p className="flex flex-wrap gap-x-4">
+            <Link href="/how/" className="underline underline-offset-4 hover:text-navy">
+              How it works
+            </Link>
+            <span>MIT licensed · built in public</span>
+          </p>
         </div>
       </footer>
     </>
-  );
-}
-
-function SignBand() {
-  return (
-    <header className="bg-navy text-white">
-      <div className="mx-auto flex h-14 w-full max-w-6xl items-center justify-between px-4 sm:px-8">
-        <a
-          href="#"
-          aria-label="SLUICE home"
-          className={`flex min-h-11 items-center gap-3 rounded-sm ${focusRing} focus-visible:outline-white`}
-        >
-          <SignalDot live />
-          <span className="font-display text-2xl leading-none font-bold tracking-[0.18em]">SLUICE</span>
-        </a>
-        <p className="sign-label text-navy-soft">
-          Platform P0 <span className="hidden sm:inline">· foundations</span>
-        </p>
-      </div>
-    </header>
   );
 }
 
@@ -143,25 +133,25 @@ function RushTicket() {
 
       <Perforation />
 
-      <dl className="flex flex-col">
-        <div className="flex flex-col gap-1 px-6 pt-6 pb-4 sm:px-8 sm:pt-8">
+      <div className="flex flex-col">
+        <dl className="flex flex-col gap-1 px-6 pt-6 pb-4 sm:px-8 sm:pt-8">
           <dt className="sign-label text-ink-muted">People in the rush</dt>
           <dd className="tabular font-display text-[4.5rem] leading-none font-semibold text-ink sm:text-[5.5rem]">
             50,000
           </dd>
-        </div>
+        </dl>
         <div className="grid grid-cols-[1fr_auto_1fr]">
-          <div className="flex flex-col gap-1 px-6 pt-2 pb-6 sm:px-8 sm:pb-8">
+          <dl className="flex flex-col gap-1 px-6 pt-2 pb-6 sm:px-8 sm:pb-8">
             <dt className="sign-label text-ink-muted">Oversold seats</dt>
             <dd className="tabular font-display text-5xl leading-none font-semibold text-ink">0</dd>
-          </div>
+          </dl>
           <PerforationVertical className="my-0 mb-6" />
-          <div className="flex flex-col gap-1 px-6 pt-2 pb-6 sm:px-8 sm:pb-8">
+          <dl className="flex flex-col gap-1 px-6 pt-2 pb-6 sm:px-8 sm:pb-8">
             <dt className="sign-label text-ink-muted">Double charges</dt>
             <dd className="tabular font-display text-5xl leading-none font-semibold text-ink">0</dd>
-          </div>
+          </dl>
         </div>
-      </dl>
+      </div>
 
       <div className="flex flex-col gap-2 bg-sunk px-6 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-8">
         <p className="tabular font-display text-xl leading-7 font-semibold tracking-wide text-navy" aria-hidden="true">

@@ -137,6 +137,10 @@ func (d HandlerDeps) availability(w http.ResponseWriter, r *http.Request) {
 		d.writeError(w, r, err)
 		return
 	}
+	// The rider's seat-map poll carries the admission token while the page
+	// is visible and renews the idle lease (best effort, never refuses;
+	// ADR 0010 addendum part 4).
+	d.Keys.TouchAdmission(r, ev.ID)
 	a, err := d.Avail.Get(r.Context(), ev)
 	if err != nil {
 		d.writeError(w, r, err)

@@ -353,3 +353,71 @@ func TestLapsedAdmissionCannotHold(t *testing.T) {
 	}
 	wantExpired("checkout ended", active)
 }
+
+// TestAvailabilityPollRenewsLease (ADR 0010 addendum part 4): the rider's
+// seat-map poll (GET /availability, public) renews the idle lease when it
+// carries the admission token, which the web client sends only while the
+// page is visible. Three admitted users browse for 140 s without a hold:
+// one polls every 20 s with the token and stays admitted with lease =
+// now + idle; one polls without the token (hidden tab) and one does not
+// poll at all, and both lapse at ADMISSION_IDLE_TTL. Every poll is a 200 or
+// 304, whatever the token. A token for another event renews nothing, and
+// the poll never renews past ADMISSION_TTL (the hard cap, checked by
+// TestActiveUserKeptUntilCap through the same Touch).
+func TestAvailabilityPollRenewsLease(t *testing.T) {
+	pgs.Require(t)
+	e := newEnv(t, capacity(10), idleTTL(idle))
+	e.toT0(0)
+	users := e.joinAll(6, 2)
+	adm := e.admitFirst(users, 3)
+	visible, hidden, gone := adm[0], adm[1], adm[2]
+	rt := httpx.NewRouter()
+	inventory.RegisterRoutes(rt, inventory.HandlerDeps{Svc: e.inv, Avail: e.inv.NewAvailabilityCache(0),
+		Keys: e.keys.WithAdmissionTouch(e.lease.Touch),
+		Idem: httpx.NewIdempotency(e.q, auth.UserID, slog.New(slog.DiscardHandler), nil), QueueEnforced: true})
+	poll := func(path, token string) {
+		t.Helper()
+		req := httptest.NewRequestWithContext(e.ctx, http.MethodGet, path, nil)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		rec := httptest.NewRecorder()
+		rt.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK && rec.Code != http.StatusNotModified {
+			t.Fatalf("availability (token %v): HTTP %d %s", token != "", rec.Code, rec.Body)
+		}
+	}
+	path := "/api/v1/events/" + e.ev.ID.String() + "/availability"
+	other := e.newEvent(10, e.clk.Now().Add(-time.Minute))
+	_, err := e.inv.Rebuild(e.ctx, other)
+	mustNil(t, err)
+	foreign, _, err := e.keys.Issue(auth.AudAdmission, gone.u.id, other, nil, time.Hour)
+	mustNil(t, err)
+
+	for step := 1; step <= 7; step++ { // t = 20 .. 140 s, well past the 60 s idle TTL
+		e.clk.Advance(20 * time.Second)
+		poll(path, visible.token)
+		poll(path, "")                                                     // the hidden tab polls without the token
+		poll(path, foreign)                                                // a token for another event: ignored
+		poll(path, "not-a-token")                                          // garbage: ignored, still a 200
+		poll("/api/v1/events/"+other.String()+"/availability", gone.token) // wrong event
+		e.tick()
+	}
+	if l, ok := e.leaseOf(visible.u.id); !ok || !l.Equal(e.clk.Now().Add(idle)) {
+		t.Fatalf("polling user: lease %s (present %v), want now + idle", l, ok)
+	}
+	if r := e.status(visible.u); r.State != queue.StateAdmitted {
+		t.Fatalf("polling user's status = %s, want ADMITTED", r.State)
+	}
+	for name, a := range map[string]admitted{"hidden tab": hidden, "not polling": gone} {
+		if _, ok := e.leaseOf(a.u.id); ok {
+			t.Errorf("%s: still in q:active after %s without a token request", name, 140*time.Second)
+		}
+		if r := e.status(a.u); r.State != queue.StateOfferExpired {
+			t.Errorf("%s: status = %s, want OFFER_EXPIRED", name, r.State)
+		}
+	}
+	if got := e.metric("queue_admission_touches_total"); got != 7 {
+		t.Errorf("touches = %.0f, want 7 (one per visible poll)", got)
+	}
+}

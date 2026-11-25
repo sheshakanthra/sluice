@@ -237,3 +237,24 @@ func (k *Keyring) RequestSubject(r *http.Request) (uuid.UUID, bool) {
 	}
 	return k.Subject(tok)
 }
+
+// TouchAdmission renews the admission lease of the request's bearer token
+// on a public route (GET /availability, ADR 0010 addendum part 4). It acts
+// only on a valid, unexpired admission token for eventID and never refuses:
+// a missing, invalid or foreign token is ignored and the route answers as it
+// would without one. It reports whether a touch ran and the lease state.
+// ADMISSION_TTL stays the hard cap: the lease is never renewed past it.
+func (k *Keyring) TouchAdmission(r *http.Request, eventID uuid.UUID) (AdmissionState, bool) {
+	if k == nil || k.touch == nil {
+		return AdmissionUnknown, false
+	}
+	tok, err := Bearer(r)
+	if err != nil {
+		return AdmissionUnknown, false
+	}
+	c, err := k.Verify(tok, AudAdmission)
+	if err != nil || c.EventID != eventID {
+		return AdmissionUnknown, false
+	}
+	return k.touch(r.Context(), c), true
+}

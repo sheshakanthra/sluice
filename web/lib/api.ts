@@ -345,12 +345,21 @@ export function getEvent(eventId: string): Promise<EventDetail> {
   return json(`/events/${enc(eventId)}`);
 }
 
-/** Returns null on 304 (the caller keeps what it has). */
+/**
+ * Returns null on 304 (the caller keeps what it has). An admission token, when
+ * given, renews the admission lease (API.md §3.3, ADR 0010 addendum part 4);
+ * callers pass it only while the page is visible.
+ */
 export async function getAvailability(
   eventId: string,
   etag: string | null,
+  admissionToken: string | null = null,
 ): Promise<{ data: Availability; etag: string | null } | null> {
-  const r = await call<Availability>(`/events/${enc(eventId)}/availability`, { etag, timeoutMs: 5000 });
+  const r = await call<Availability>(`/events/${enc(eventId)}/availability`, {
+    etag,
+    token: admissionToken,
+    timeoutMs: 5000,
+  });
   if (r.status === 304 || r.data === null) return null;
   return { data: r.data, etag: r.etag };
 }
@@ -423,4 +432,19 @@ export function getOrder(orderId: string, sessionToken: string): Promise<Order> 
 
 export function getStats(eventId: string): Promise<Stats> {
   return json(`/stats/${enc(eventId)}`, { timeoutMs: 3000 });
+}
+
+/**
+ * Whether POST /demo/rush is available: only in demo mode, which /healthz
+ * reports as mode "demo" (API.md; demo mode lands in P7, until then the API
+ * always says "live"). No probe request, so nothing 404s in the console.
+ */
+export async function demoRushAvailable(): Promise<boolean> {
+  const h = await healthz(1500).catch(() => null);
+  return h?.mode === "demo";
+}
+
+/** Start a demo rush (demo mode only): resets the Tatkal event and sets T0. */
+export function startDemoRush(bots: number, opensInS: number): Promise<unknown> {
+  return json("/demo/rush", { method: "POST", body: { bots, opens_in_s: opensInS } });
 }

@@ -126,3 +126,21 @@ The check and the hold script are two Redis calls, not one script. A release tha
   - `TestLapsedAdmissionCannotHold` (real Redis and PG): a lapsed user gets 403 and no hold, both before and after pruning; an active user gets 201; the status says OFFER_EXPIRED and the rejoin is honoured; a released checkout can't hold again.
   - `TestOrderCreateRefusesLapsedAdmission`: lapsed → 403 and no order; live → 201.
   - Mutation check: with the gate disabled, both integration tests fail because the lapsed user gets 201.
+
+## Addendum, part 4 (2026-11-24): the seat-map poll renews the lease while the page is visible
+
+**Status:** accepted (owner decision, session P6b step 0).
+
+### Context
+P6a found that a real person picking seats makes no admission-token request while they look at the map: the seat map polls the public `GET /availability`, and only `POST /holds`, `POST /orders`, `DELETE /holds/{id}` and `DELETE /queue` carried the token. After `ADMISSION_IDLE_TTL` (60 s in `rush`) of browsing, the hold answered 403 `ADMISSION_EXPIRED` and the rider got the rejoin screen (P6a report §2, verified at 65 s). Part 2's intent was to free the slots of users who have gone, not of users who are reading the map.
+
+### Decision
+- `GET /events/{id}/availability` stays public and never refuses. When it carries `Authorization: Bearer <admission token>` that verifies (signature, audience, `exp`) and whose `eid` is this event, the handler calls the same lease touch as the other admission routes (`Keyring.TouchAdmission` → `queue_touch.lua`), best effort: the lease state never changes the answer, and a missing, invalid, expired or foreign token is ignored (200/304 as without one).
+- **The web client sends the token only while the page is visible** (Page Visibility API, `document.visibilityState === "visible"`). A hidden tab keeps polling at the server interval (DESIGN-BRIEF §5.7) but anonymously, so a user who switches away for longer than `ADMISSION_IDLE_TTL` still lapses and frees the slot, as part 2 intends.
+- **`ADMISSION_TTL` stays the hard cap.** The touch is the same `queue_touch.lua`: it never renews past `q:cap` and never revives a lapsed lease (part 3).
+- Cost: one extra Redis call per availability poll that carries a token. The swarm doesn't send the token on availability, so the load-test path is unchanged.
+
+### Consequences
+- A visible seat map keeps the admission alive up to the cap; the rejoin screen now appears only for riders who left the page (hidden or closed) for `ADMISSION_IDLE_TTL`, or who reached `ADMISSION_TTL`.
+- A client could poll to keep a slot it isn't using, up to `ADMISSION_TTL`. That was already true of any admission-token request (e.g. `DELETE /holds/{unknown}`); the cap bounds it.
+- Tests: `TestAvailabilityPollRenewsLease` (real Redis and PG): over 140 s, the user polling with the token stays ADMITTED with lease = now + idle; the user polling without the token and the user not polling both lapse (OFFER_EXPIRED); a garbage token, a token for another event and a token on another event's map renew nothing and still get 200/304; touches = 7, one per visible poll. Mutation check: with the handler's touch removed, the test fails (`polling user: lease ... present false`).

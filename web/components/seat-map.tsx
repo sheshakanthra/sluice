@@ -191,7 +191,6 @@ export function CoachTabs({
             tabIndex={isActive ? 0 : -1}
             onClick={() => onSelect(c.coach)}
             onKeyDown={(e) => onKey(e, idx)}
-            aria-label={`${c.label}, ${free === null ? "loading" : `${free} free`}${sel ? `, ${sel} selected` : ""}`}
             className={cn(
               "relative flex min-h-16 cursor-pointer flex-col items-start gap-1 rounded-sm border-2 px-2 py-2 text-left transition-colors duration-150",
               "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-navy",
@@ -201,18 +200,26 @@ export function CoachTabs({
             <span className="flex w-full items-center justify-between gap-1">
               <span className="font-display text-lg leading-6 font-bold">{c.label}</span>
               {sel > 0 && (
-                <span className="tabular flex size-5 items-center justify-center rounded-full bg-signal font-display text-xs font-bold text-ink">
+                <span
+                  aria-hidden="true"
+                  className="tabular flex size-5 items-center justify-center rounded-full bg-signal font-display text-xs font-bold text-ink"
+                >
                   {sel}
                 </span>
               )}
             </span>
             {mini && (
-              <span className={cn("hidden rounded-[2px] p-0.5 sm:block", isActive ? "bg-white" : "bg-paper")}>
+              <span
+                aria-hidden="true"
+                className={cn("hidden rounded-[2px] p-0.5 sm:block", isActive ? "bg-white" : "bg-paper")}
+              >
                 <CoachMinimap coach={c} layout={layout} states={mini} />
               </span>
             )}
             <span className={cn("tabular text-xs leading-4", isActive ? "text-navy-soft" : "text-ink-subtle")}>
-              {free === null ? "…" : `${formatCount(free)} free`}
+              <span className="sr-only">, </span>
+              {free === null ? "loading" : `${formatCount(free)} free`}
+              {sel > 0 && <span className="sr-only">, {sel} selected</span>}
             </span>
           </button>
         );

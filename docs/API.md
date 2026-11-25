@@ -67,12 +67,12 @@ The client-observable outcomes of a rush (sold out, taken, rate-limited) are **n
 | Method | Path | Auth | IK | Purpose |
 |---|---|---|---|---|
 | GET | `/healthz` | — | | Liveness (always 200 while the process runs) |
-| GET | `/api/v1/healthz` | — | | Same as `/healthz`, reachable through Caddy. Returns `{"status":"ok","mode":"live"}`. The web app uses it to detect LIVE vs REPLAY |
+| GET | `/api/v1/healthz` | — | | Same as `/healthz`, reachable through Caddy. Returns `{"status":"ok","mode":"live"}` (`"demo"` once demo mode lands in P7; Rush Control shows "Start a demo rush" only then). The web app uses it to detect LIVE vs REPLAY |
 | GET | `/readyz` | — | | Readiness (PG + Redis reachable, migrations applied) |
 | POST | `/api/v1/sessions` | — | | Create an anonymous user + session token |
 | GET | `/api/v1/events` | — | | List events (+ status, sale times, counts) |
 | GET | `/api/v1/events/{eventId}` | — | | Event details + seat layout |
-| GET | `/api/v1/events/{eventId}/availability` | — | | Seat-state bitmap + counts (ETag) |
+| GET | `/api/v1/events/{eventId}/availability` | — (optional admission) | | Seat-state bitmap + counts (ETag). An admission token for this event renews the lease (§3.3) |
 | POST | `/api/v1/events/{eventId}/queue` | session | | Join (idempotent per user); `?rejoin=true` after OFFER_EXPIRED |
 | GET | `/api/v1/events/{eventId}/queue/status` | queue | | Position / admission (hot path; no Redis for waiting users) |
 | DELETE | `/api/v1/events/{eventId}/queue` | queue or admission | | Leave (frees an admission slot) |
@@ -124,7 +124,7 @@ After T0 it returns `"state": "WAITING", "ticket_no": 41234`. Already sold out �
 `state` is one of `PREQUEUE | WAITING | PAUSED | ADMITTED | SOLD_OUT | OFFER_EXPIRED | CLOSED`.
 - `queue_token` is set when the server re-issues it: PREQUEUE → WAITING carries the resolved ticket. The client must replace its stored token.
 - `admission_token` and `admission_expires_at` are set only on ADMITTED. Both carry the admission's hard cap (`q:cap`: claim + `ADMISSION_TTL`), floored to the second, so repeated polls report the same value.
-- The admission is also a sliding lease: every request that presents the admission token renews it to `ADMISSION_IDLE_TTL` from now (never past the cap). An admitted user who makes no request for `ADMISSION_IDLE_TTL` loses the admission: `POST /holds` and `POST /orders` answer 403 `ADMISSION_EXPIRED`, and a later status poll answers `OFFER_EXPIRED` (ADR 0010 addendum). A lapsed lease is never renewed. Clients that end without seats should still call `DELETE /queue` at once.
+- The admission is also a sliding lease: every request that presents the admission token renews it to `ADMISSION_IDLE_TTL` from now (never past the cap). An admitted user who makes no request for `ADMISSION_IDLE_TTL` loses the admission: `POST /holds` and `POST /orders` answer 403 `ADMISSION_EXPIRED`, and a later status poll answers `OFFER_EXPIRED` (ADR 0010 addendum). A lapsed lease is never renewed. `GET /availability` is public but also renews the lease when it carries a valid admission token for that event (best effort, never refuses; a missing, invalid or foreign token is ignored). The web client sends it only while the page is visible (Page Visibility API), so a visible seat map keeps the admission alive up to the cap and a hidden or closed tab lets it lapse (ADR 0010 addendum part 4). Clients that end without seats should still call `DELETE /queue` at once.
 - An admission ends early when the user's checkout ends: their order reaches CONFIRMED, FAILED or EXPIRED, or their hold is released or expires (ADR 0010 addendum). The admission token still verifies until its `exp`, but it can no longer be spent: `POST /holds` and `POST /orders` check the lease in Redis (the same `queue_touch.lua` call that renews it, so no extra round trip) and answer 403 `ADMISSION_EXPIRED`. A later status poll answers `OFFER_EXPIRED`, because the admission is no longer in `q:active` and the offer was used. A rejoin is then honoured (bounded by the two-rejoin limit and the per-user quota). Other admission-token routes (`DELETE /holds/{id}`, `DELETE /queue`) still accept the token. If the check itself fails (Redis unreachable), the two routes answer 503 `DEPENDENCY_UNAVAILABLE`. If Redis lost the queue state (`q:init` missing, R1), the token alone decides until the queue is restored. Direct mode (`QUEUE_ENFORCED=false`) with a session token is not checked. `POST /test/admit` writes a lease the way a claim does.
 
 ### 3.4 `POST /events/{id}/holds` (IK) → 201

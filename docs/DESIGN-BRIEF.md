@@ -79,12 +79,14 @@ Seat states must **not rely on colour alone**:
 - Playwright runs `@axe-core/playwright` on every route, with 0 serious or critical violations allowed.
 
 ## 7. Performance budgets
+**JS rule (every route): framework + at most 50 KB (gzip) of app code** (ADR 0012). "Framework" is Next's `rootMainFiles` in `.next/build-manifest.json` (React DOM, the Next client runtime, the Turbopack loader: 128.7 KB gzip on Next 16.4 + React 19.3). App code is every other script the route's exported HTML loads, minus `noModule` polyfills. Lazy chunks (`next/dynamic`) don't count toward first load. Check: `node web/scripts/js-budget.mjs` after `pnpm build` (exit 1 when a route is over).
+
 | Route | JS (gzipped) | Other |
 |---|---|---|
-| `/queue` | ≤ 120 KB | LCP ≤ 2.0 s on mid-range Android over 4G throttle; CLS < 0.05; one tiny JSON poll |
-| `/book` | ≤ 200 KB | Seat map renders 500 seats in < 16 ms per frame on update (memoised cells, keyed diffs) |
-| `/control`, `/results` | ≤ 300 KB | Charts lazy-loaded |
-| All | — | Lighthouse mobile: Performance ≥ 90, Accessibility ≥ 95, Best Practices ≥ 95 |
+| `/queue` | framework + ≤ 50 KB; imports nothing heavy (no charts, no motion library) | LCP ≤ 2.0 s on mid-range Android over 4G throttle; CLS < 0.05; one tiny JSON poll |
+| `/book` | framework + ≤ 50 KB | Seat map renders 500 seats in < 16 ms per frame on update (memoised cells, keyed diffs) |
+| `/control`, `/results` | framework + ≤ 50 KB first load | Charts lazy-loaded |
+| All | framework + ≤ 50 KB | Lighthouse mobile: Performance ≥ 90, Accessibility ≥ 95, Best Practices ≥ 95 |
 
 ## 8. Copy deck (key lines)
 - Pre-queue: "You're in the pre-queue. At 10:00:00 IST everyone here gets a random place in line, so arriving earlier doesn't help, but don't be late."

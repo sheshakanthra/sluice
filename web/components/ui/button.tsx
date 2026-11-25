@@ -1,5 +1,5 @@
-import { Button as ButtonPrimitive } from "@base-ui/react/button";
 import { cva, type VariantProps } from "class-variance-authority";
+import type { ComponentProps } from "react";
 
 import { cn } from "@/lib/utils";
 
@@ -26,8 +26,19 @@ const buttonVariants = cva(
   },
 );
 
-function Button({ className, variant, size, ...props }: ButtonPrimitive.Props & VariantProps<typeof buttonVariants>) {
-  return <ButtonPrimitive data-slot="button" className={cn(buttonVariants({ variant, size }), className)} {...props} />;
+// A native <button> (type="button" unless set): the Base UI primitive added
+// ~14 KB gzip to every page for behaviour the platform already has (P6b
+// JS budgets).
+function Button({
+  className,
+  variant,
+  size,
+  type = "button",
+  ...props
+}: ComponentProps<"button"> & VariantProps<typeof buttonVariants>) {
+  return (
+    <button data-slot="button" type={type} className={cn(buttonVariants({ variant, size }), className)} {...props} />
+  );
 }
 
 export { Button, buttonVariants };

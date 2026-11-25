@@ -165,9 +165,25 @@ export function ReplayNotice({ what }: { what: string }) {
       >
         <p>
           Booking needs the running stack: the waiting room, seat holds and payments are real services, not mock-ups.
-          The Rush Control and Results pages replay a recorded CI run instead.
+          Rush Control and Results replay a recorded run instead, labelled with its run id.
         </p>
       </Notice>
+      <figure className="flex flex-col gap-2">
+        <video
+          // #t=1 skips the recorder's blank first frame, so the still shows /queue, not a black box.
+          src="/results/latest/booking.webm#t=1"
+          controls
+          muted
+          playsInline
+          preload="metadata"
+          aria-describedby="booking-video-cap"
+          className="aspect-video w-full rounded-sm border border-rule bg-ink"
+        />
+        <figcaption id="booking-video-cap" className="text-sm leading-5 text-ink-muted">
+          The booking flow recorded by the end-to-end test (E1) against the full stack: join, admitted, best two seats,
+          hosted MockPay checkout, ticket. No sound.
+        </figcaption>
+      </figure>
       <div className="rounded-sm border border-rule bg-card p-4 sm:p-6">
         <p className="sign-label text-ink-muted">Run it yourself in 2 commands</p>
         <ol className="mt-4 flex flex-col gap-3 font-mono text-sm text-ink">

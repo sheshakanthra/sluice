@@ -120,7 +120,10 @@ function BookView({ slug }: { slug: string }) {
     retry: false,
     queryFn: async () => {
       const prev = qc.getQueryData<AvailState>(["avail", slug]);
-      const r = await getAvailability(slug, prev?.etag ?? null);
+      // The visible seat map keeps the turn alive: the token rides along only
+      // while the page is visible, so a hidden tab lets the idle lease lapse.
+      const visible = typeof document === "undefined" || document.visibilityState === "visible";
+      const r = await getAvailability(slug, prev?.etag ?? null, visible ? readEntry(slug).admissionToken : null);
       if (!r) {
         if (prev) return prev;
         throw new ApiError({ title: "No availability yet", status: 0, code: "NETWORK" });
@@ -483,7 +486,9 @@ function TurnBand({ capLeft, onLeave, leaving }: { capLeft: number | null; onLea
             <span className={cn("tabular font-display text-2xl font-semibold", low ? "text-warning" : "text-navy")}>
               {formatMMSS(capLeft)}
             </span>
-            <span className="text-ink-muted">at most to hold seats. An idle turn ends sooner.</span>
+            <span className="text-ink-muted">
+              left to hold seats. Keep this page open: your turn ends if you leave it for long.
+            </span>
           </>
         ) : (
           <span className="text-ink-muted">Pick seats and hold them to start checkout</span>

@@ -10,8 +10,43 @@ import { cn } from "@/lib/utils";
 export const focusRing =
   "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-navy focus-visible:outline-solid";
 
-/** The navy sign band at the top of every flow page. */
-export function SiteHeader({ children }: { children?: ReactNode }) {
+const NAV = [
+  { href: "/control/", label: "Rush Control" },
+  { href: "/results/", label: "Results" },
+  { href: "/how/", label: "How it works" },
+] as const;
+
+/**
+ * The navy sign band at the top of every page. Booking pages pass nav={false}:
+ * a rider mid-checkout gets no exits that aren't part of the flow.
+ */
+export function SiteHeader({
+  children,
+  nav = false,
+  current,
+}: {
+  children?: ReactNode;
+  nav?: boolean;
+  current?: (typeof NAV)[number]["href"];
+}) {
+  const links = nav && (
+    <ul className="flex items-center gap-1">
+      {NAV.map((l) => (
+        <li key={l.href}>
+          <Link
+            href={l.href}
+            aria-current={current === l.href ? "page" : undefined}
+            className={cn(
+              "flex min-h-11 cursor-pointer items-center rounded-sm px-2 text-sm font-semibold text-navy-soft transition-colors duration-150 hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white sm:px-3",
+              current === l.href && "text-white underline decoration-signal decoration-2 underline-offset-8",
+            )}
+          >
+            {l.label}
+          </Link>
+        </li>
+      ))}
+    </ul>
+  );
   return (
     <header className="bg-navy text-white">
       <div className="mx-auto flex h-14 w-full max-w-6xl items-center justify-between gap-4 px-4 sm:px-8">
@@ -24,10 +59,20 @@ export function SiteHeader({ children }: { children?: ReactNode }) {
           <span className="font-display text-2xl leading-none font-bold tracking-[0.18em]">SLUICE</span>
         </Link>
         <div className="flex items-center gap-3">
+          {links && (
+            <nav aria-label="Main" className="hidden md:block">
+              {links}
+            </nav>
+          )}
           {children}
           <ModeBadge />
         </div>
       </div>
+      {links && (
+        <nav aria-label="Main" className="border-t border-white/15 md:hidden">
+          <div className="mx-auto w-full max-w-6xl px-2 sm:px-6">{links}</div>
+        </nav>
+      )}
     </header>
   );
 }
