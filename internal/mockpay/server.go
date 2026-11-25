@@ -181,7 +181,8 @@ func New(ctx context.Context, pool *pgxpool.Pool, reg *prometheus.Registry, o Op
 	h := sha256.Sum256([]byte(o.APIKey))
 	s := &Server{pool: pool, q: mpdb.New(pool), o: o, keyHash: h[:], metrics: m, reg: reg, client: o.HTTPClient}
 	if s.client == nil {
-		s.client = &http.Client{}
+		// Belt and braces: post() also bounds each delivery by WebhookTimeout.
+		s.client = &http.Client{Timeout: 30 * time.Second}
 	}
 	if err := s.q.UpsertMerchant(ctx, mpdb.UpsertMerchantParams{
 		ID: MerchantID, ApiKeyHash: s.keyHash, WebhookUrl: o.WebhookURL, WebhookSecret: o.WebhookSecret,
@@ -194,7 +195,7 @@ func New(ctx context.Context, pool *pgxpool.Pool, reg *prometheus.Registry, o Op
 // Handler returns the HTTP API, the hosted checkout and /metrics.
 func (s *Server) Handler() http.Handler {
 	rt := httpx.NewRouter()
-	httpx.RegisterHealth(rt, s.o.Log, httpx.Check{Name: "postgres", Ping: s.pool.Ping})
+	httpx.RegisterHealth(rt, httpx.NewReadiness(s.o.Log, httpx.DefaultReadyTTL, httpx.Check{Name: "postgres", Ping: s.pool.Ping}))
 	rt.Handle("GET /metrics", obs.MetricsHandler(s.reg))
 	api := func(op, pattern string, h http.HandlerFunc) { rt.Handle(pattern, s.timed(op, s.requireKey(h))) }
 	api(payments.OpCreate, "POST /v1/intents", s.handleCreate)

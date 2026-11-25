@@ -1,0 +1,40 @@
+# Chaos overlay (P7, LOADTEST / phase P7 task 3): Toxiproxy between the API
+# replicas and Postgres, Redis and MockPay. Layered on the full stack:
+#   docker compose -f deploy/compose.yml -f deploy/compose.app.yml \
+#     -f deploy/compose.rush.yml -f deploy/compose.chaos.yml ...
+# `task chaos` does this. The worker, MockPay and the auditor keep direct
+# connections; only api1..3 go through the proxy.
+name: sluice
+
+x-chaos-api: &chaos-api
+  environment:
+    DATABASE_URL: postgres://sluice:sluice@toxiproxy:15432/sluice?sslmode=disable
+    MOCKPAY_DATABASE_URL: postgres://sluice:sluice@toxiproxy:15432/mockpay?sslmode=disable
+    REDIS_URL: redis://toxiproxy:16379/0
+    MOCKPAY_URL: http://toxiproxy:18090
+  depends_on:
+    toxiproxy:
+      condition: service_started
+
+services:
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    command: ["-host", "0.0.0.0", "-config", "/config/toxiproxy.json"]
+    volumes:
+      - ./toxiproxy/toxiproxy.json:/config/toxiproxy.json:ro
+    ports:
+      # Control API for the chaos script (host loopback only).
+      - "127.0.0.1:8474:8474"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  api1:
+    <<: *chaos-api
+  api2:
+    <<: *chaos-api
+  api3:
+    <<: *chaos-api

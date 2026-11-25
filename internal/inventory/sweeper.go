@@ -21,6 +21,9 @@ import (
 // sweepBatch is the per-transaction and per-event batch (ARCHITECTURE §4.4).
 const sweepBatch = 200
 
+// sweepTimeout bounds one sweep round.
+const sweepTimeout = 30 * time.Second
+
 // SweepResult counts what one sweep did.
 type SweepResult struct {
 	Reclaimed     int // PG: ACTIVE|PAYMENT_PENDING -> EXPIRED, seats freed
@@ -37,7 +40,11 @@ func (s *Service) RunSweeper(ctx context.Context, interval time.Duration) error 
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
-		if res, err := s.SweepOnce(ctx); err != nil {
+		// Bound each round so a stalled datastore cannot wedge the loop (P7).
+		sctx, cancel := context.WithTimeout(ctx, sweepTimeout)
+		res, err := s.SweepOnce(sctx)
+		cancel()
+		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}

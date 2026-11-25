@@ -1,15 +1,20 @@
 package inventory_test
 
 import (
+	"context"
 	"errors"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/sheshakanthra/sluice/internal/db"
 	"github.com/sheshakanthra/sluice/internal/db/gen"
 	"github.com/sheshakanthra/sluice/internal/inventory"
+	"github.com/sheshakanthra/sluice/internal/redisx"
 	"github.com/sheshakanthra/sluice/internal/redisx/keys"
 )
 
@@ -442,4 +447,68 @@ func metric(e *env, name string) float64 {
 		}
 	}
 	return v
+}
+
+// TestCompensationOnAbandonedCommit: under overload a hold's PG commit can
+// be abandoned (the request deadline passes while it waits for a pool
+// connection). The Redis grant must be undone at once, not left to block
+// its seats until expiry (P7a: inventory drift after the 20k B2 run).
+// Many goroutines race it under -race.
+func TestCompensationOnAbandonedCommit(t *testing.T) {
+	e := newEnv(t, capacity(50))
+	// A second service on a 1-connection pool that the test keeps busy.
+	tiny, err := db.NewPool(e.ctx, e.dbURL, 1)
+	mustNil(t, err)
+	defer tiny.Close()
+	reg := prometheus.NewRegistry()
+	sc, err := redisx.NewScripts(e.rdb, reg)
+	mustNil(t, err)
+	m, err := inventory.NewMetrics(reg)
+	mustNil(t, err)
+	svc, err := inventory.NewService(tiny, e.rdb, sc, inventory.Options{HoldTTL: time.Hour, MaxSeats: 4, Metrics: m})
+	mustNil(t, err)
+	// Warm the event cache with one successful hold (seat 45).
+	if _, err := svc.Hold(e.ctx, e.eventID, uuid.New(), newKey(), seatsReq(45)); err != nil {
+		t.Fatal(err)
+	}
+
+	conn, err := tiny.Acquire(e.ctx)
+	mustNil(t, err)
+	const n = 20
+	var wg sync.WaitGroup
+	errs := make([]error, n)
+	hids := make([]uuid.UUID, n)
+	for i := range n {
+		wg.Go(func() {
+			uid, key := uuid.New(), newKey()
+			hids[i] = inventory.HoldID(uid, key)
+			ctx, cancel := context.WithTimeout(e.ctx, 300*time.Millisecond)
+			defer cancel()
+			//nolint:gosec // G115: i < n = 20
+			_, errs[i] = svc.Hold(ctx, e.eventID, uid, key, seatsReq(int32(2*i+1), int32(2*i+2)))
+		})
+	}
+	wg.Wait()
+	conn.Release()
+
+	for i, err := range errs {
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("hold %d: err = %v, want deadline exceeded", i, err)
+		}
+		if e.redisHoldExists(hids[i]) {
+			t.Errorf("hold %d: redis grant survived an abandoned commit", i)
+		}
+	}
+	for seat := int32(1); seat <= 2*n; seat++ {
+		if !e.inAvail(seat) {
+			t.Errorf("seat %d not back in redis avail", seat)
+		}
+	}
+	if got := e.countHolds(gen.HoldStatusACTIVE); got != 1 {
+		t.Errorf("active PG holds = %d, want 1 (the warm-up)", got)
+	}
+	// Seats are holdable again right away.
+	if _, err := e.hold(uuid.New(), newKey(), seatsReq(1, 2)); err != nil {
+		t.Errorf("hold after compensation: %v", err)
+	}
 }

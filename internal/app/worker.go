@@ -8,6 +8,8 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/sheshakanthra/sluice/internal/config"
@@ -49,6 +51,9 @@ func RunWorker(ctx context.Context, cfg *config.Config, log *slog.Logger) error 
 	defer func() { _ = rdb.Close() }()
 
 	reg := obs.NewRegistry()
+	if err := obs.RegisterPoolStats(reg, map[string]*pgxpool.Pool{"main": pg}, map[string]*redis.Client{"main": rdb}); err != nil {
+		return err
+	}
 	sc, err := newScripts(ctx, log, reg, rdb)
 	if err != nil {
 		return fmt.Errorf("worker: %w", err)
@@ -77,11 +82,11 @@ func RunWorker(ctx context.Context, cfg *config.Config, log *slog.Logger) error 
 	}
 
 	rt := httpx.NewRouter()
-	httpx.RegisterHealth(rt, log,
+	httpx.RegisterHealth(rt, httpx.NewReadiness(log, httpx.DefaultReadyTTL,
 		httpx.Check{Name: "postgres", Ping: pg.Ping},
 		httpx.Check{Name: "redis", Ping: func(ctx context.Context) error { return rdb.Ping(ctx).Err() }},
 		httpx.Check{Name: "migrations", Ping: mig.Check},
-	)
+	))
 	rt.Handle("GET /metrics", obs.MetricsHandler(reg))
 	srv := httpx.NewServer(cfg.WorkerHTTPAddr, httpx.Chain(rt, httpx.Recover(log)), log)
 
@@ -124,7 +129,9 @@ func runIdempotencyGC(ctx context.Context, q *gen.Queries, log *slog.Logger) err
 		case <-ctx.Done():
 			return nil
 		case <-t.C:
-			n, err := httpx.GCIdempotencyKeys(ctx, q, time.Now())
+			gctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			n, err := httpx.GCIdempotencyKeys(gctx, q, time.Now())
+			cancel()
 			if err != nil {
 				log.ErrorContext(ctx, "idempotency gc", slog.String("error", err.Error()))
 				continue

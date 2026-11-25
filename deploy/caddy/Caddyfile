@@ -1,6 +1,8 @@
 # SLUICE front door (:8000): /api/* -> api1..3, /pay/* -> mockpay, else the static web app.
 {
 	admin off
+	# HTTP metrics for Prometheus, served on :9180 (in-network only).
+	metrics
 	servers {
 		# The swarm (and any peer on the compose network) sends a synthetic
 		# X-Forwarded-For; Caddy keeps it and appends the peer, so the API's
@@ -10,16 +12,51 @@
 }
 
 :8000 {
+	# Security headers (P7 hygiene). No HSTS: :8000 is plain HTTP; TLS and
+	# HSTS belong to whatever terminates TLS in front (DEPLOY.md).
+	# Next's static export inlines its bootstrap scripts, hence 'unsafe-inline'.
+	header {
+		X-Content-Type-Options nosniff
+		X-Frame-Options DENY
+		Referrer-Policy strict-origin-when-cross-origin
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+		Cross-Origin-Opener-Policy same-origin
+		Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; media-src 'self'; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'"
+		-Server
+	}
+
+	# Body cap at the edge, matching the API's 64 KiB (API.md §1).
+	request_body {
+		max_size 64KB
+	}
+
 	handle /api/* {
 		reverse_proxy api1:8080 api2:8080 api3:8080 {
 			lb_policy least_conn
+			# A dial failure (replica killed, C2) is retried on another
+			# replica for up to 1 s instead of answering 502.
+			lb_try_duration 1s
+			lb_try_interval 100ms
 			# Active health check: a replica that fails /readyz gets no traffic.
+			# /readyz is served from a cached state and dedicated health pools
+			# (ADR 0013), so a busy replica stays in rotation and sheds load
+			# itself with 503 OVERLOADED instead of being ejected.
 			health_uri /readyz
 			health_interval 2s
 			health_timeout 2s
 			health_status 2xx
-			# Passive: a replica that refuses connections is skipped for 5 s.
+			# One slow probe on a CPU-starved box must not eject a replica:
+			# 3 consecutive failures (about 6 s) mark it down, 1 pass brings
+			# it back. A killed replica is caught sooner by the passive check.
+			health_fails 3
+			health_passes 1
+			# Passive: 100 failed dials within 5 s mark a replica down for
+			# the rest of that window. A killed replica (C2) reaches that in
+			# well under a second at rush rates; the old default (1 failure)
+			# let a single Docker-DNS or connect timeout on a CPU-starved
+			# laptop eject a healthy replica (P7a, ADR 0013).
 			fail_duration 5s
+			max_fails 100
 			transport http {
 				keepalive 2m
 				keepalive_idle_conns_per_host 1024
@@ -36,4 +73,9 @@
 		try_files {path} {path}.html {path}/index.html /index.html
 		file_server
 	}
+}
+
+# Prometheus scrape target (compose network only; not published).
+:9180 {
+	metrics /metrics
 }

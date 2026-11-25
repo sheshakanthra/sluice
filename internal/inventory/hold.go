@@ -166,7 +166,13 @@ func (s *Service) hold(ctx context.Context, eventID, userID uuid.UUID, idemKey s
 	}
 	h, takeovers, err := s.commit(ctx, ev, g, now)
 	if err != nil {
-		if !s.pgOnly && (errors.Is(err, ErrSeatsTaken) || errors.Is(err, ErrHoldLimit) || errors.Is(err, ErrQuotaExceeded)) {
+		// Compensate a refusal, and also an abandoned commit (the request
+		// was cancelled or timed out, e.g. waiting for a pool connection
+		// under overload): otherwise the Redis grant blocks its seats until
+		// its expiry (P7a, ADR 0013). PG stays the judge: if the commit did
+		// land after all, repairSeats takes the seats back out of avail.
+		if !s.pgOnly && (errors.Is(err, ErrSeatsTaken) || errors.Is(err, ErrHoldLimit) || errors.Is(err, ErrQuotaExceeded) ||
+			errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
 			s.compensate(ctx, ev, g, err)
 		}
 		return Hold{}, err
@@ -437,8 +443,8 @@ func (s *Service) commit(ctx context.Context, ev *EventInfo, g grant, now time.T
 	return h, takeovers, nil
 }
 
-// compensate undoes a Redis grant that PG refused and repairs the seats PG
-// says are not free (ARCHITECTURE §4.2). Best effort: a failure is logged
+// compensate undoes a Redis grant that PG refused (or whose commit was
+// abandoned) and repairs the seats PG says are not free (ARCHITECTURE §4.2). Best effort: a failure is logged
 // and the sweeper releases the grant at its expiry anyway.
 func (s *Service) compensate(ctx context.Context, ev *EventInfo, g grant, cause error) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), sideEffectTimeout)

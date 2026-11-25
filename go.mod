@@ -19,6 +19,7 @@ require (
 	github.com/testcontainers/testcontainers-go v0.45.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.45.0
 	github.com/testcontainers/testcontainers-go/modules/redis v0.45.0
+	go.uber.org/goleak v1.3.0
 	golang.org/x/sync v0.25.0
 	pgregory.net/rapid v1.3.0
 )

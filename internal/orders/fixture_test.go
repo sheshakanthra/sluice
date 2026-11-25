@@ -37,6 +37,7 @@ import (
 	"github.com/sheshakanthra/sluice/internal/orders"
 	"github.com/sheshakanthra/sluice/internal/payments"
 	"github.com/sheshakanthra/sluice/internal/redisx"
+	"github.com/sheshakanthra/sluice/internal/testutil/leakcheck"
 	"github.com/sheshakanthra/sluice/internal/testutil/pgtest"
 	"github.com/sheshakanthra/sluice/internal/testutil/redistest"
 )
@@ -69,7 +70,7 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	pgs.Close()
 	rs.Close()
-	os.Exit(code)
+	os.Exit(leakcheck.Check(code))
 }
 
 const (

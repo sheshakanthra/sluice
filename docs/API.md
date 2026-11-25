@@ -17,7 +17,7 @@ Send it as `Authorization: Bearer <token>`. Every token has `iss=sluice`, `iat`,
 - Header: `Idempotency-Key: <8–128 chars>`. The client generates it (UUID) once per user intent and reuses it on retries.
 - Scope is `(user_id, key)`. The stored request hash is `sha256(method | route | canonical JSON body)`.
 - Same key and same hash, already completed → **replay** the stored status and body, plus the header `Idempotent-Replayed: true`. Responses with status < 500 are stored (business 4xx outcomes included). A 5xx deletes the key, so the retry runs again. The replayed body has the same JSON values, but key order and spacing follow Postgres `jsonb` (ADR 0006).
-- Canonical JSON means the body decoded and re-encoded with object keys sorted and numbers kept verbatim, so whitespace and key order don't change the hash. Bodies are capped at 64 KiB.
+- Canonical JSON means the body decoded and re-encoded with object keys sorted and numbers kept verbatim, so whitespace and key order don't change the hash. Bodies are capped at 64 KiB (every API route, and at Caddy).
 - Same key and a **different** hash → `422 IDEMPOTENCY_KEY_REUSED`.
 - Same key while the first request is still in flight → `409 REQUEST_IN_PROGRESS` with `Retry-After: 1`.
 - A STARTED key past `locked_until` (a crash) becomes re-executable. Handlers must be safe to re-run, which is why hold IDs are deterministic and PSP keys are deterministic.
@@ -52,6 +52,7 @@ Send it as `Authorization: Bearer <token>`. Every token has `iss=sluice`, `iat`,
 | `PAYMENT_ATTEMPTS_EXHAUSTED` | 422 | More than 3 attempts |
 | `RATE_LIMITED` | 429 | With `Retry-After` |
 | `DEPENDENCY_UNAVAILABLE` | 503 | Redis/PG/PSP down; with `Retry-After` |
+| `OVERLOADED` | 503 | This API replica is at its in-flight limit (`MAX_IN_FLIGHT`); with `Retry-After: 1`. Retry the same request (same `Idempotency-Key`). Probes and `/metrics` are never shed (ADR 0013) |
 | `INTERNAL` | 500 | Unexpected fault only (recovered panic, bug). Never a business outcome; see ADR 0003 |
 
 The client-observable outcomes of a rush (sold out, taken, rate-limited) are **never** 5xx (I8).
@@ -68,7 +69,7 @@ The client-observable outcomes of a rush (sold out, taken, rate-limited) are **n
 |---|---|---|---|---|
 | GET | `/healthz` | — | | Liveness (always 200 while the process runs) |
 | GET | `/api/v1/healthz` | — | | Same as `/healthz`, reachable through Caddy. Returns `{"status":"ok","mode":"live"}` (`"demo"` once demo mode lands in P7; Rush Control shows "Start a demo rush" only then). The web app uses it to detect LIVE vs REPLAY |
-| GET | `/readyz` | — | | Readiness (PG + Redis reachable, migrations applied) |
+| GET | `/readyz` | — | | Readiness (PG + Redis reachable, migrations applied). Served from a cached state refreshed in the background (≤ 1 s old) over dedicated health connections, so a busy replica still answers fast; 503 while draining on shutdown (ADR 0013) |
 | POST | `/api/v1/sessions` | — | | Create an anonymous user + session token |
 | GET | `/api/v1/events` | — | | List events (+ status, sale times, counts) |
 | GET | `/api/v1/events/{eventId}` | — | | Event details + seat layout |

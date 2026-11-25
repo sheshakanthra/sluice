@@ -25,11 +25,20 @@ x-sluice: &sluice
     MOCKPAY_DATABASE_URL: postgres://sluice:sluice@postgres:5432/mockpay?sslmode=disable
     REDIS_URL: redis://redis:6379/0
   restart: unless-stopped
-  stop_grace_period: 15s
+  # API drain: 3 s with /readyz at 503, then up to 15 s of Shutdown.
+  stop_grace_period: 25s
 
 x-api: &api
   <<: *sluice
   command: ["api"]
+  environment:
+    DATABASE_URL: postgres://sluice:sluice@postgres:5432/sluice?sslmode=disable
+    MOCKPAY_DATABASE_URL: postgres://sluice:sluice@postgres:5432/mockpay?sslmode=disable
+    REDIS_URL: redis://redis:6379/0
+    # Go runtime (P7 hygiene). Soft heap target well above the measured
+    # peak (P7a report §3: ~85 MiB per replica at 20k users); GOGC default.
+    GOMEMLIMIT: 512MiB
+    GOGC: "100"
   depends_on:
     # seed depends on migrate. A one-shot must be some service's dependency,
     # or `up --wait` reports its exit as a failure.
@@ -75,6 +84,12 @@ services:
   worker:
     <<: *sluice
     command: ["worker"]
+    environment:
+      DATABASE_URL: postgres://sluice:sluice@postgres:5432/sluice?sslmode=disable
+      MOCKPAY_DATABASE_URL: postgres://sluice:sluice@postgres:5432/mockpay?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      GOMEMLIMIT: 256MiB
+      GOGC: "100"
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -92,6 +107,12 @@ services:
   mockpay:
     <<: *sluice
     command: ["mockpay"]
+    environment:
+      DATABASE_URL: postgres://sluice:sluice@postgres:5432/sluice?sslmode=disable
+      MOCKPAY_DATABASE_URL: postgres://sluice:sluice@postgres:5432/mockpay?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      GOMEMLIMIT: 256MiB
+      GOGC: "100"
     depends_on:
       postgres:
         condition: service_healthy

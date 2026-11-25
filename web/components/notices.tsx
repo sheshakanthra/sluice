@@ -102,6 +102,8 @@ export function humanProblem(err: unknown): Human {
       return { title: "One moment", body: `Too many requests from this browser in a short time.${wait}` };
     case "DEPENDENCY_UNAVAILABLE":
       return { title: "Part of SLUICE is briefly unavailable", body: `Nothing was booked or charged.${wait}` };
+    case "OVERLOADED":
+      return { title: "SLUICE is very busy right now", body: `Nothing was booked or charged.${wait}` };
     case "INTERNAL":
       return {
         title: "Something broke on our side",

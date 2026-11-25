@@ -94,6 +94,10 @@ type Config struct {
 	MockpayDatabaseURL string
 	DBMaxConns         int32
 	RedisURL           string
+	// MaxInFlight bounds concurrent API requests per replica; beyond it a
+	// request waits up to ShedWait, then gets 503 OVERLOADED (ADR 0013).
+	MaxInFlight int
+	ShedWait    time.Duration
 
 	TokenKeys         []TokenKey
 	AdminToken        string
@@ -160,6 +164,8 @@ func Load(lookup LookupFunc) (*Config, error) {
 	c.MockpayDatabaseURL = r.url("MOCKPAY_DATABASE_URL", "postgres://sluice:sluice@localhost:5433/mockpay?sslmode=disable", "postgres", "postgresql")
 	c.DBMaxConns = int32(r.intIn("DB_MAX_CONNS", 24, 1, 1000)) //nolint:gosec // bounded to [1, 1000] above
 	c.RedisURL = r.url("REDIS_URL", "redis://localhost:6381/0", "redis", "rediss")
+	c.MaxInFlight = r.intIn("MAX_IN_FLIGHT", 96, 0, 100000)
+	c.ShedWait = r.duration("SHED_WAIT", "50ms")
 
 	c.TokenKeys = r.tokenKeys("TOKEN_KEYS", defaultTokenKeys)
 	c.AdminToken = r.secret("ADMIN_TOKEN", defaultAdminToken, 16)

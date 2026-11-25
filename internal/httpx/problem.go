@@ -37,6 +37,8 @@ const (
 	CodePaymentAttemptsExhausted Code = "PAYMENT_ATTEMPTS_EXHAUSTED"
 	CodeRateLimited              Code = "RATE_LIMITED"
 	CodeDependencyUnavailable    Code = "DEPENDENCY_UNAVAILABLE"
+	// CodeOverloaded: this replica is at its in-flight limit (Shed, ADR 0013).
+	CodeOverloaded Code = "OVERLOADED"
 	// CodeInternal is only for unexpected faults (recovered panics, bugs).
 	// Business outcomes never use it (I8). See docs/adr/0003-internal-error-code.md.
 	CodeInternal Code = "INTERNAL"
@@ -69,6 +71,7 @@ var catalogue = map[Code]codeInfo{
 	CodePaymentAttemptsExhausted: {http.StatusUnprocessableEntity, "No payment attempts left for this order"},
 	CodeRateLimited:              {http.StatusTooManyRequests, "Too many requests"},
 	CodeDependencyUnavailable:    {http.StatusServiceUnavailable, "A dependency is temporarily unavailable"},
+	CodeOverloaded:               {http.StatusServiceUnavailable, "The service is busy; retry shortly"},
 	CodeInternal:                 {http.StatusInternalServerError, "Something went wrong on our side"},
 }
 

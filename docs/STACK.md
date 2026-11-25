@@ -48,7 +48,7 @@ Source commands: `go version`, `node -v`, `pnpm -v`, `task --version`, `golangci
 | Postgres image | `postgres:18.7` | `deploy/compose.yml`, `internal/app/api_integration_test.go` |
 | Redis image | `redis:8.10.3` | `deploy/compose.yml`, `internal/app/api_integration_test.go` |
 | Prometheus / Grafana | `prom/prometheus:v3.16.0` / `grafana/grafana:13.3.1` | `deploy/compose.yml` |
-| Caddy / Toxiproxy / k6 | `caddy:2.11.9` (P5); k6 later in P5, Toxiproxy P7 | `deploy/compose.app.yml` |
+| Caddy / Toxiproxy / k6 | `caddy:2.11.9` (P5) / `ghcr.io/shopify/toxiproxy:2.12.0` (P7) / k6 (P5) | `deploy/compose.app.yml`, `deploy/compose.chaos.yml` |
 | Build / runtime images | `golang:1.27.4` (build stage) / `gcr.io/distroless/static-debian12:nonroot` | `deploy/docker/Dockerfile` |
 | pgx / go-redis / client_golang / uuid / golang-jwt | pgx v5.13.0 / go-redis v9.23.0 / client_golang v1.25.0 / uuid v1.6.0 / golang-jwt/jwt/v5 v5.3.1 (P2) | `go.mod` |
 | testcontainers-go | v0.45.0 (+ modules/postgres, modules/redis v0.45.0) | `go.mod` |
@@ -103,18 +103,20 @@ sluice/
 ├── loadtest/
 │   ├── k6/                    # spike-queue.js, checkout.js
 │   ├── manual/                # phase manual-check scripts (p4-flow.py: open-sale → queue → buy)
+│   ├── chaos/                 # run.sh (task chaos: C1–C4) + verdict.py (one table row per case)
 │   └── results/               # raw runs (gitignored); curated copies go to docs/results/
 ├── deploy/
 │   ├── compose.yml            # infra: postgres, redis, prometheus, grafana
 │   ├── compose.app.yml        # migrate + seed one-shots, api1..3, worker, mockpay, caddy (+ web static volume)
 │   ├── compose.rush.yml       # swarm + auditor containers (profile rush; sysctls, ulimits, results volume)
-│   ├── compose.chaos.yml      # toxiproxy wiring
+│   ├── compose.chaos.yml      # chaos overlay: toxiproxy between api1..3 and postgres/redis/mockpay (task chaos)
+│   ├── toxiproxy/toxiproxy.json  # proxy definitions
 │   ├── env/                   # rush.env, demo.env.example, scenario overlays rush.b0/b1/b2.env (SLUICE_SCENARIO; no real secrets)
 │   ├── docker/Dockerfile      # multi-stage → distroless static image with the sluice binary
 │   ├── caddy/Caddyfile
 │   ├── postgres/init/01-mockpay-db.sql
 │   ├── prometheus/prometheus.yml
-│   └── grafana/{provisioning,dashboards}/
+│   └── grafana/{provisioning,dashboards}/   # dashboards/sluice.json: 7 rows (Traffic … Runtime)
 ├── docs/                      # specs, phases, reports, adr, results
 └── .github/workflows/         # ci.yml, rush.yml
 ```
@@ -147,7 +149,9 @@ sluice/
 | `PPROF_ADDR` | *(empty)* | `:6060` | Enables pprof when set |
 | `DATABASE_URL` | `postgres://sluice:sluice@localhost:5433/sluice?sslmode=disable` | | |
 | `MOCKPAY_DATABASE_URL` | `postgres://sluice:sluice@localhost:5433/mockpay?sslmode=disable` | | Separate DB, same server |
-| `DB_MAX_CONNS` | `24` | `24` | Per process |
+| `DB_MAX_CONNS` | `24` | `24` | Per process (request pool). The API also opens a 2-connection readiness pool (ADR 0013) |
+| `MAX_IN_FLIGHT` | `96` | `96` | API only: concurrent requests per replica before shedding with 503 `OVERLOADED`; `0` disables (ADR 0013) |
+| `SHED_WAIT` | `50ms` | `50ms` | API only: how long a request waits for an in-flight slot before it is shed |
 | `REDIS_URL` | `redis://localhost:6381/0` | | |
 | `TOKEN_KEYS` | `dev1:<base64 32 bytes>` | | `kid:secret,...`; the first one signs, all of them verify |
 | `ADMIN_TOKEN` | `dev-admin-token-change-me` | | Bearer token for `/admin/*` |

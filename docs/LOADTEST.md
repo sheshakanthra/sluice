@@ -105,7 +105,7 @@ at once as NO_SEAT; only a SOLD_OUT answer is SOLD_OUT.
 | **B1** holds-only | 10,000 | off | correct | naive (`BASELINE=holds_only`) | Show holds fixed but payments still broken | oversold = 0, **duplicate charges > 0** |
 | **B2** direct | 10,000 | off | correct | idempotent | Correct without the queue, but slower | 0 / 0, worse latency and error rate than H |
 | E1 (optional) | 10,000 | off | `HOLD_PATH=pg_only` | idempotent | Value of the Redis fast path | 0 / 0; compare p95 with B2 |
-| C1–C4 | 10,000 | on | correct | idempotent | Chaos (P7) | All invariants 0 |
+| C1–C4 | 5,000 (SMOKE size, `USERS=`; ADR 0014) | on | correct | idempotent | Chaos (P7): `task chaos`, Toxiproxy overlay `deploy/compose.chaos.yml` | I1–I4 = 0 plus each case's rule (ADR 0014) |
 
 B0 doubles as the **auditor sensitivity test**: if the auditor reports 0 on B0, the auditor is broken.
 

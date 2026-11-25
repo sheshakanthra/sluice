@@ -30,6 +30,23 @@ func NewClient(url string) (*redis.Client, error) {
 	return redis.NewClient(opt), nil
 }
 
+// NewHealthClient is a 2-connection client for readiness probes only
+// (ADR 0013): request traffic can exhaust the main client's pool, and a
+// probe stuck behind it would make a busy replica look dead.
+func NewHealthClient(url string) (*redis.Client, error) {
+	opt, err := redis.ParseURL(url)
+	if err != nil {
+		return nil, errors.New("parse REDIS_URL: invalid URL")
+	}
+	opt.DialTimeout = time.Second
+	opt.ReadTimeout = time.Second
+	opt.WriteTimeout = time.Second
+	opt.PoolSize = 2
+	opt.MinIdleConns = 1
+	opt.PoolTimeout = time.Second
+	return redis.NewClient(opt), nil
+}
+
 //go:embed scripts/*.lua
 var scriptFS embed.FS
 

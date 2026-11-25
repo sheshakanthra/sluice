@@ -322,8 +322,13 @@ tasks:
       - task: k6:run
         vars: { NAME: k2, SCRIPT: checkout.js, SEATS: "50000", K6_ENV: '-e STEPS={{.STEPS | default "200"}} -e STEP_S={{.STEP_S | default "60"}}' }
   chaos:
-    desc: "TODO(P7) chaos suite"
-    cmds: ["echo 'TODO(P7) - chaos is not implemented yet' && exit 1"]
+    desc: "Chaos suite C1-C4 (SMOKE-sized rush + one fault each, then the audit; Toxiproxy overlay deploy/compose.chaos.yml). CASES='C1 C3' runs a subset; USERS (5000)"
+    env:
+      SLUICE_ENV: "{{.ENV}}"
+      SLUICE_VERSION: "{{.VERSION}}"
+      USERS: '{{.USERS | default "5000"}}'
+    cmds:
+      - bash loadtest/chaos/run.sh {{.CASES | default "C1 C2 C3 C4"}}
   demo:
     desc: "TODO(P8) live demo stack"
     cmds: ["echo 'TODO(P8) - demo is not implemented yet' && exit 1"]

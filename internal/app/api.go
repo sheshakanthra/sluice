@@ -35,6 +35,13 @@ import (
 // requestTimeout bounds every API request context.
 const requestTimeout = 10 * time.Second
 
+// healthPoolConns sizes the readiness-only Postgres pool (ADR 0013).
+const healthPoolConns = 2
+
+// drainDelay is how long a stopping replica keeps serving with /readyz at
+// 503, so Caddy's active health check (every 2 s) moves traffic first.
+const drainDelay = 3 * time.Second
+
 // availabilityMinAge is how often each replica re-checks an event's seat map.
 const availabilityMinAge = 100 * time.Millisecond
 
@@ -45,6 +52,14 @@ type Deps struct {
 	Registry *prometheus.Registry
 	PG       *pgxpool.Pool
 	Redis    *redis.Client
+	// HealthPG and HealthRedis serve /readyz only (ADR 0013), so a
+	// saturated request pool never makes the replica look dead. nil falls
+	// back to PG / Redis (tests).
+	HealthPG    *pgxpool.Pool
+	HealthRedis *redis.Client
+	// Ready, if set, is the readiness state /readyz serves (RunAPI keeps
+	// it to flip it to draining on shutdown). nil builds one.
+	Ready *httpx.Readiness
 	// Migrations reports whether goose and River migrations are applied
 	// (nil error) for /readyz. Usually (*db.Migrator).Check.
 	Migrations func(ctx context.Context) error
@@ -58,14 +73,25 @@ func NewRedis(url string) (*redis.Client, error) { return redisx.NewClient(url) 
 // recover → CORS → timeout → router.
 func APIHandler(ctx context.Context, d Deps) (http.Handler, error) {
 	rt := httpx.NewRouter()
+	hpg, hrdb := d.HealthPG, d.HealthRedis
+	if hpg == nil {
+		hpg = d.PG
+	}
+	if hrdb == nil {
+		hrdb = d.Redis
+	}
 	checks := []httpx.Check{
-		{Name: "postgres", Ping: d.PG.Ping},
-		{Name: "redis", Ping: func(ctx context.Context) error { return d.Redis.Ping(ctx).Err() }},
+		{Name: "postgres", Ping: hpg.Ping},
+		{Name: "redis", Ping: func(ctx context.Context) error { return hrdb.Ping(ctx).Err() }},
 	}
 	if d.Migrations != nil {
 		checks = append(checks, httpx.Check{Name: "migrations", Ping: d.Migrations})
 	}
-	httpx.RegisterHealth(rt, d.Log, checks...)
+	if d.Ready == nil {
+		d.Ready = httpx.NewReadiness(d.Log, httpx.DefaultReadyTTL)
+	}
+	d.Ready.SetChecks(checks...)
+	httpx.RegisterHealth(rt, d.Ready)
 	rt.Handle("GET /metrics", obs.MetricsHandler(d.Registry))
 
 	keyring, err := auth.NewKeyring(d.Config.TokenKeys, nil)
@@ -176,6 +202,8 @@ func APIHandler(ctx context.Context, d Deps) (http.Handler, error) {
 		httpx.Observe(d.Log, m),
 		httpx.Recover(d.Log),
 		httpx.CORS(d.Config.CORSOrigins),
+		httpx.Shed(d.Config.MaxInFlight, d.Config.ShedWait, httpx.NewShedMetrics(d.Registry, "api")),
+		httpx.BodyLimit(httpx.MaxBodyBytes),
 		httpx.Timeout(requestTimeout),
 	), nil
 }
@@ -189,8 +217,15 @@ func RunAPI(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 		return err
 	}
 	defer pg.Close()
+	// Dedicated readiness clients (ADR 0013): /readyz never waits behind
+	// request traffic for a connection.
+	hpg, err := db.NewPool(ctx, cfg.DatabaseURL, healthPoolConns)
+	if err != nil {
+		return err
+	}
+	defer hpg.Close()
 
-	mig, err := db.NewMigrator(pg, log)
+	mig, err := db.NewMigrator(hpg, log)
 	if err != nil {
 		return err
 	}
@@ -201,16 +236,56 @@ func RunAPI(ctx context.Context, cfg *config.Config, log *slog.Logger) error {
 		return err
 	}
 	defer func() { _ = rdb.Close() }()
+	hrdb, err := redisx.NewHealthClient(cfg.RedisURL)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = hrdb.Close() }()
 
-	d := Deps{Config: cfg, Log: log, Registry: obs.NewRegistry(), PG: pg, Redis: rdb, Migrations: mig.Check}
+	reg := obs.NewRegistry()
+	if err := obs.RegisterPoolStats(reg, map[string]*pgxpool.Pool{"main": pg, "health": hpg},
+		map[string]*redis.Client{"main": rdb, "health": hrdb}); err != nil {
+		return err
+	}
+	ready := httpx.NewReadiness(log, httpx.DefaultReadyTTL)
+	d := Deps{
+		Config: cfg, Log: log, Registry: reg, PG: pg, Redis: rdb,
+		HealthPG: hpg, HealthRedis: hrdb, Ready: ready, Migrations: mig.Check,
+	}
 	h, err := APIHandler(ctx, d)
 	if err != nil {
 		return fmt.Errorf("api: %w", err)
 	}
 	srv := httpx.NewServer(cfg.HTTPAddr, h, log)
 
+	// Graceful shutdown (P7): on SIGTERM /readyz turns 503 first; after
+	// drainDelay (longer than Caddy's 2 s health_interval) the server stops
+	// accepting and Shutdown drains in-flight requests.
+	serveCtx, stopServe := context.WithCancel(context.WithoutCancel(ctx))
+	defer stopServe()
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-serveCtx.Done():
+			return
+		}
+		ready.SetDraining()
+		log.InfoContext(serveCtx, "draining: readiness now 503", slog.Duration("delay", drainDelay))
+		t := time.NewTimer(drainDelay)
+		defer t.Stop()
+		select {
+		case <-t.C:
+		case <-serveCtx.Done():
+		}
+		stopServe()
+	}()
+
 	g, gctx := errgroup.WithContext(ctx)
-	g.Go(func() error { return httpx.Serve(gctx, srv, log, nil) })
+	g.Go(func() error {
+		err := httpx.Serve(serveCtx, srv, log, nil)
+		stopServe()
+		return err
+	})
 	if ps := obs.NewPprofServer(cfg.PprofAddr); ps != nil {
 		g.Go(func() error { return httpx.Serve(gctx, ps, log.With(slog.String("server", "pprof")), nil) })
 	}

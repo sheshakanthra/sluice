@@ -65,6 +65,7 @@ func TestProblemCatalogue(t *testing.T) {
 		{CodePaymentAttemptsExhausted, 422, "https://sluice.dev/errors/payment-attempts-exhausted"},
 		{CodeRateLimited, 429, "https://sluice.dev/errors/rate-limited"},
 		{CodeDependencyUnavailable, 503, "https://sluice.dev/errors/dependency-unavailable"},
+		{CodeOverloaded, 503, "https://sluice.dev/errors/overloaded"},
 		{CodeInternal, 500, "https://sluice.dev/errors/internal"},
 	}
 	if len(tests) != len(catalogue) {
@@ -86,7 +87,7 @@ func TestProblemCatalogue(t *testing.T) {
 func TestBusinessOutcomesAreNever5xx(t *testing.T) {
 	// I8: "no" is always a 2xx/4xx. Only infra codes may be 5xx.
 	for code, ci := range catalogue {
-		if ci.status >= 500 && code != CodeDependencyUnavailable && code != CodeInternal {
+		if ci.status >= 500 && code != CodeDependencyUnavailable && code != CodeOverloaded && code != CodeInternal {
 			t.Errorf("%s maps to %d", code, ci.status)
 		}
 	}
@@ -130,10 +131,10 @@ func TestRouterAndHealth(t *testing.T) {
 	var redisErr error
 	var mu sync.Mutex
 	rt := NewRouter()
-	RegisterHealth(rt, discardLogger(),
+	RegisterHealth(rt, NewReadiness(discardLogger(), 0,
 		Check{Name: "postgres", Ping: func(context.Context) error { return nil }},
 		Check{Name: "redis", Ping: func(context.Context) error { mu.Lock(); defer mu.Unlock(); return redisErr }},
-	)
+	))
 	h := stack(rt, discardLogger(), NewHTTPMetrics(prometheus.NewRegistry(), "test"), nil, nil)
 
 	get := func(path string) *httptest.ResponseRecorder {

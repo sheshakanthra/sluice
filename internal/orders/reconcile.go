@@ -213,6 +213,11 @@ func (s *Service) RefreshAuditCache(ctx context.Context) error {
 			errs = append(errs, fmt.Errorf("audit %s: %w", ev.ID, err))
 			continue
 		}
+		if s.o.Metrics != nil {
+			for check, v := range map[string]int64{"oversold": c.Oversold, "duplicates": c.Duplicates, "orphans": c.Orphans, "tickets": c.Tickets} {
+				s.o.Metrics.invariants.WithLabelValues(ev.ID.String(), check).Set(float64(v))
+			}
+		}
 		k := keys.Audit(ev.ID)
 		pipe := s.rdb.TxPipeline()
 		pipe.HSet(ctx, k, "oversold", c.Oversold, "duplicates", c.Duplicates, "orphans", c.Orphans,

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/sheshakanthra/sluice/internal/config"
@@ -43,7 +44,11 @@ func RunMockpay(ctx context.Context, cfg *config.Config, log *slog.Logger) error
 	if err := mockpay.Migrate(ctx, pool); err != nil {
 		return err
 	}
-	srv, err := mockpay.New(ctx, pool, obs.NewRegistry(), MockpayOptions(cfg, log))
+	reg := obs.NewRegistry()
+	if err := obs.RegisterPoolStats(reg, map[string]*pgxpool.Pool{"main": pool}, nil); err != nil {
+		return err
+	}
+	srv, err := mockpay.New(ctx, pool, reg, MockpayOptions(cfg, log))
 	if err != nil {
 		return err
 	}

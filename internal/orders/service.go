@@ -72,6 +72,8 @@ type Metrics struct {
 	webhooks   *prometheus.CounterVec
 	duplicates prometheus.Counter
 	orphans    prometheus.Counter
+	// invariants is the live audit cache as a gauge (P7 dashboard).
+	invariants *prometheus.GaugeVec
 }
 
 // NewMetrics registers the P3 order/payment metrics on reg.
@@ -92,8 +94,11 @@ func NewMetrics(reg prometheus.Registerer) (*Metrics, error) {
 		orphans: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "orphans_fixed_total", Help: "PSP intents holding money without a confirmed order, voided or refunded by the reconciler.",
 		}),
+		invariants: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "audit_live", Help: "Live audit cache (every 5 s per ON_SALE event): oversold, duplicates, orphans must stay 0; tickets is informational.",
+		}, []string{"event_id", "check"}),
 	}
-	for _, c := range []prometheus.Collector{m.orders, m.payments, m.webhooks, m.duplicates, m.orphans} {
+	for _, c := range []prometheus.Collector{m.orders, m.payments, m.webhooks, m.duplicates, m.orphans, m.invariants} {
 		if err := reg.Register(c); err != nil {
 			return nil, fmt.Errorf("orders metrics: %w", err)
 		}

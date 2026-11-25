@@ -24,6 +24,7 @@ import (
 	"github.com/sheshakanthra/sluice/internal/inventory"
 	"github.com/sheshakanthra/sluice/internal/redisx"
 	"github.com/sheshakanthra/sluice/internal/redisx/keys"
+	"github.com/sheshakanthra/sluice/internal/testutil/leakcheck"
 	"github.com/sheshakanthra/sluice/internal/testutil/pgtest"
 	"github.com/sheshakanthra/sluice/internal/testutil/redistest"
 )
@@ -56,7 +57,7 @@ func TestMain(m *testing.M) {
 	code := m.Run()
 	pgs.Close()
 	rs.Close()
-	os.Exit(code)
+	os.Exit(leakcheck.Check(code))
 }
 
 // modes are the two hold paths every race test runs against.
@@ -76,6 +77,7 @@ type env struct {
 	reg     *prometheus.Registry
 	pgOnly  bool
 	ttl     time.Duration
+	dbURL   string
 	eventID uuid.UUID
 	slug    string
 }
@@ -110,7 +112,7 @@ func newEnv(t *testing.T, opts ...envOpt) *env {
 	for _, o := range opts {
 		o(&cfg)
 	}
-	pool, _ := pgs.NewMigratedDB(t)
+	pool, dbURL := pgs.NewMigratedDB(t)
 	rdb := rs.NewClient(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	t.Cleanup(cancel)
@@ -124,7 +126,7 @@ func newEnv(t *testing.T, opts ...envOpt) *env {
 	})
 	mustNil(t, err)
 	e := &env{t: t, ctx: ctx, pool: pool, q: gen.New(pool), rdb: rdb, sc: sc, svc: svc, reg: reg,
-		pgOnly: cfg.pgOnly, ttl: cfg.ttl}
+		pgOnly: cfg.pgOnly, ttl: cfg.ttl, dbURL: dbURL}
 	e.eventID, e.slug = e.newEvent(cfg.capacity)
 	if !cfg.pgOnly {
 		_, err := svc.Rebuild(ctx, e.eventID)

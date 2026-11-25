@@ -17,6 +17,7 @@ import (
 
 	"github.com/sheshakanthra/sluice/internal/config"
 	"github.com/sheshakanthra/sluice/internal/db"
+	"github.com/sheshakanthra/sluice/internal/httpx"
 	"github.com/sheshakanthra/sluice/internal/obs"
 	"github.com/sheshakanthra/sluice/internal/testutil/tcretry"
 )
@@ -128,6 +129,19 @@ func TestReadyzAgainstRealDependencies(t *testing.T) {
 		return resp.StatusCode, body
 	}
 
+	// readyzEventually polls until /readyz answers want (readiness is cached
+	// and refreshed in the background, ADR 0013), or gives up after 5 s.
+	readyzEventually := func(want int) (int, map[string]any) {
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			code, body := readyz()
+			if code == want || time.Now().After(deadline) {
+				return code, body
+			}
+			time.Sleep(httpx.DefaultReadyTTL / 4)
+		}
+	}
+
 	// Not migrated yet: reachable but not ready.
 	code, body := readyz()
 	checks, _ := body["checks"].(map[string]any)
@@ -137,7 +151,8 @@ func TestReadyzAgainstRealDependencies(t *testing.T) {
 	if _, err := mig.Up(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
-	if code, body := readyz(); code != http.StatusOK {
+	// The cached 503 ages out and a background refresh replaces it.
+	if code, body := readyzEventually(http.StatusOK); code != http.StatusOK {
 		t.Fatalf("migrated, both deps up: /readyz = %d %v", code, body)
 	}
 
@@ -156,11 +171,15 @@ func TestReadyzAgainstRealDependencies(t *testing.T) {
 		t.Fatalf("/api/v1/events on an empty catalogue = %d %+v", resp.StatusCode, list)
 	}
 
+	t.Run("saturated request pool", func(t *testing.T) {
+		testReadyzUnderSaturation(ctx, t, cfg, mig.Check, rdb)
+	})
+
 	stopTimeout := 10 * time.Second
 	if err := redisC.Stop(ctx, &stopTimeout); err != nil {
 		t.Fatalf("stop redis: %v", err)
 	}
-	code, body = readyz()
+	code, body = readyzEventually(http.StatusServiceUnavailable)
 	checks, _ = body["checks"].(map[string]any)
 	if code != http.StatusServiceUnavailable || checks["redis"] != "unavailable" || checks["postgres"] != "ok" {
 		t.Fatalf("redis down: /readyz = %d %v", code, body)
