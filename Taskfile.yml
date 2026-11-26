@@ -193,7 +193,7 @@ tasks:
       SLUICE_COMMIT: "{{.COMMIT}}"
     preconditions:
       - sh: test -f deploy/env/{{.ENV}}.env
-        msg: "deploy/env/{{.ENV}}.env does not exist (ENV=dev and ENV=demo profiles are not written yet; use ENV=rush)"
+        msg: "deploy/env/{{.ENV}}.env does not exist (profiles: rush, demo; task demo creates demo.env)"
     cmds:
       - "{{.STACK}} build migrate"
       - "{{.STACK}} up -d --wait"
@@ -329,9 +329,32 @@ tasks:
       USERS: '{{.USERS | default "5000"}}'
     cmds:
       - bash loadtest/chaos/run.sh {{.CASES | default "C1 C2 C3 C4"}}
+  # ---------- live demo (DEPLOY.md B, ADR 0016) ----------
   demo:
-    desc: "TODO(P8) live demo stack"
-    cmds: ["echo 'TODO(P8) - demo is not implemented yet' && exit 1"]
+    desc: "Live demo: demo.env with fresh secrets (once), web static build, full stack with ENV=demo (migrate + seed), then the URLs"
+    cmds:
+      - node deploy/scripts/demo-env.mjs
+      - task: web:build
+      - task: stack:up
+        vars: { ENV: demo }
+      - cmd: |
+          echo ""
+          echo "SLUICE live demo is up (ENV=demo)"
+          echo "  App          http://localhost:8000/"
+          echo "  Calm booking http://localhost:8000/event/?e=quiet-tuesday"
+          echo "  Rush Control http://localhost:8000/control/"
+          echo "  Grafana      http://localhost:3001/  (local only, never tunnelled)"
+          echo "Share it:      task tunnel   (prints https://<random>.trycloudflare.com)"
+          echo "Stop it:       task stack:down ENV=demo"
+        silent: true
+
   tunnel:
-    desc: "TODO(P8) Cloudflare quick tunnel"
-    cmds: ["echo 'TODO(P8) - tunnel is not implemented yet' && exit 1"]
+    desc: "Cloudflare Quick Tunnel (no account) to the Caddy front door only; prints https://<random>.trycloudflare.com. Ctrl+C ends it"
+    preconditions:
+      - sh: test -n "$(docker ps -q -f name=^sluice-caddy-1$ -f status=running)"
+        msg: "the front door (sluice-caddy-1) is not running: run task demo first"
+    cmds:
+      # cloudflared runs from its pinned image on the compose network, so the
+      # only thing it can reach and expose is caddy:8000 (web, /api, /pay).
+      # Grafana, Prometheus, Postgres and Redis are never behind the tunnel.
+      - docker run --rm --name sluice-tunnel --network sluice_default cloudflare/cloudflared:2026.11.2 tunnel --no-autoupdate --url http://caddy:8000

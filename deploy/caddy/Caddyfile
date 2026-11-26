@@ -64,6 +64,12 @@
 		}
 	}
 
+	# MockPay's /metrics is for Prometheus on the compose network only; the
+	# front door (and so the live-demo tunnel) must not serve it (ADR 0016).
+	handle /pay/metrics* {
+		respond 404
+	}
+
 	handle_path /pay/* {
 		reverse_proxy mockpay:8090
 	}

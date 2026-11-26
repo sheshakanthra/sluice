@@ -191,12 +191,12 @@ func Load(lookup LookupFunc) (*Config, error) {
 	c.ReconcileInterval = r.duration("RECONCILE_INTERVAL", "30s")
 
 	c.MockpayURL = r.url("MOCKPAY_URL", "http://localhost:8090", "http", "https")
-	c.MockpayPublicURL = r.url("MOCKPAY_PUBLIC_URL", "http://localhost:8090", "http", "https")
+	c.MockpayPublicURL = r.publicURL("MOCKPAY_PUBLIC_URL", "http://localhost:8090")
 	c.MockpayAPIKey = r.secret("MOCKPAY_API_KEY", "dev-mockpay-key", 8)
 	c.PSPMaxConns = r.intIn("PSP_MAX_CONNS", 64, 1, 4096)
 	c.MockpayWebhookSecret = r.secret("MOCKPAY_WEBHOOK_SECRET", "dev-webhook-secret", 8)
 	c.PublicWebhookURL = r.url("PUBLIC_WEBHOOK_URL", "http://localhost:8080/api/v1/webhooks/mockpay", "http", "https")
-	c.PublicAppURL = r.url("PUBLIC_APP_URL", "http://localhost:3000", "http", "https")
+	c.PublicAppURL = r.publicURL("PUBLIC_APP_URL", "http://localhost:3000")
 	c.MockpayLatencyMS = r.intRange("MOCKPAY_LATENCY_MS", "20-60")
 	c.MockpayFailRate = r.floatIn("MOCKPAY_FAIL_RATE", 0, 0, 1)
 	c.MockpayTimeoutAfterCommitRate = r.floatIn("MOCKPAY_TIMEOUT_AFTER_COMMIT_RATE", 0, 0, 1)
@@ -351,6 +351,27 @@ func (r *reader) url(key, def string, schemes ...string) string {
 		}
 	}
 	r.fail(key, fmt.Errorf("scheme must be one of %s with a host", strings.Join(schemes, ", ")))
+	return v
+}
+
+// publicURL reads a URL that browsers follow: an absolute http(s) URL with a
+// host, or a same-origin absolute path such as "/pay" (ADR 0016: behind a
+// Cloudflare Quick Tunnel the public host is random, so the demo profile
+// uses paths). Protocol-relative "//host" is refused: it would leave the origin.
+func (r *reader) publicURL(key, def string) string {
+	v := r.raw(key, def)
+	u, err := url.Parse(v)
+	if err != nil {
+		r.fail(key, errors.New("not a valid URL"))
+		return v
+	}
+	if (u.Scheme == "http" || u.Scheme == "https") && u.Host != "" {
+		return v
+	}
+	if u.Scheme == "" && u.Host == "" && strings.HasPrefix(v, "/") && !strings.HasPrefix(v, "//") && !strings.HasPrefix(v, "/\\") {
+		return v
+	}
+	r.fail(key, errors.New("must be an http(s) URL with a host or a path starting with a single /"))
 	return v
 }
 

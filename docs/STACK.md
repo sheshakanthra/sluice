@@ -35,7 +35,7 @@ Everything here is free and open source and runs locally from Docker images. **N
 | Lint | golangci-lint **v2**, `govulncheck`, ESLint, Prettier, `tsc --noEmit` | v2 | Quality gates in CI |
 | CI | **GitHub Actions** (`ubuntu-latest`: 4 vCPU / 16 GB, free and unlimited for public repos) | — | Also the canonical rush environment |
 | Static hosting | **Vercel Hobby** (P8; replay mode) | — | Free, no card |
-| Live demo tunnel | **Cloudflare Quick Tunnel** (`cloudflared tunnel --url`) | latest | No account; HTTPS URL for interviews |
+| Live demo tunnel | **Cloudflare Quick Tunnel** (`cloudflared tunnel --url`) | `cloudflare/cloudflared:2026.11.2` (Docker image, no host install; ADR 0016) | No account; HTTPS URL for interviews |
 
 ### 1.1 Pinned versions (filled in by P0 with the exact versions installed)
 Source commands: `go version`, `node -v`, `pnpm -v`, `task --version`, `golangci-lint --version`, `govulncheck -version`, `docker version`, `go.mod`, `web/package.json`, `deploy/compose.yml`.
@@ -49,6 +49,7 @@ Source commands: `go version`, `node -v`, `pnpm -v`, `task --version`, `golangci
 | Redis image | `redis:8.10.3` | `deploy/compose.yml`, `internal/app/api_integration_test.go` |
 | Prometheus / Grafana | `prom/prometheus:v3.16.0` / `grafana/grafana:13.3.1` | `deploy/compose.yml` |
 | Caddy / Toxiproxy / k6 | `caddy:2.11.9` (P5) / `ghcr.io/shopify/toxiproxy:2.12.0` (P7) / k6 (P5) | `deploy/compose.app.yml`, `deploy/compose.chaos.yml` |
+| cloudflared | `cloudflare/cloudflared:2026.11.2` (P8) | `Taskfile.yml` (`task tunnel`) |
 | Build / runtime images | `golang:1.27.4` (build stage) / `gcr.io/distroless/static-debian12:nonroot` | `deploy/docker/Dockerfile` |
 | pgx / go-redis / client_golang / uuid / golang-jwt | pgx v5.13.0 / go-redis v9.23.0 / client_golang v1.25.0 / uuid v1.6.0 / golang-jwt/jwt/v5 v5.3.1 (P2) | `go.mod` |
 | testcontainers-go | v0.45.0 (+ modules/postgres, modules/redis v0.45.0) | `go.mod` |
@@ -87,7 +88,7 @@ sluice/
 │   ├── mockpay/               # PSP simulator: intents, ledger, webhooks, faults, checkout page;
 │   │                          #   migrations/ (own goose schema, applied at start-up), queries/, mpdb/ (sqlc)
 │   ├── stats/                 # live stats; reads the audit cache that orders.RefreshAuditCache writes
-│   ├── demo/                  # demo rush (bots) for live mode
+│   ├── demo/                  # demo rush (bots) for live mode (P8b; not built yet, ADR 0016)
 │   ├── rush/                  # swarm load generator + reporter
 │   ├── audit/                 # invariant auditor
 │   ├── obs/                   # slog, metrics registry, pprof
@@ -112,6 +113,7 @@ sluice/
 │   ├── compose.chaos.yml      # chaos overlay: toxiproxy between api1..3 and postgres/redis/mockpay (task chaos)
 │   ├── toxiproxy/toxiproxy.json  # proxy definitions
 │   ├── env/                   # rush.env, demo.env.example, scenario overlays rush.b0/b1/b2.env (SLUICE_SCENARIO; no real secrets)
+│   ├── scripts/demo-env.mjs   # task demo: demo.env from demo.env.example with fresh random secrets (once)
 │   ├── docker/Dockerfile      # multi-stage → distroless static image with the sluice binary
 │   ├── caddy/Caddyfile
 │   ├── postgres/init/01-mockpay-db.sql
@@ -175,12 +177,12 @@ sluice/
 | `SWEEPER_INTERVAL` | `1s` | | |
 | `RECONCILE_INTERVAL` | `30s` | | |
 | `MOCKPAY_URL` | `http://localhost:8090` | `http://mockpay:8090` | Server-to-server |
-| `MOCKPAY_PUBLIC_URL` | `http://localhost:8090` | `http://localhost:8000/pay` | What browsers see |
+| `MOCKPAY_PUBLIC_URL` | `http://localhost:8090` | `http://localhost:8000/pay` | What browsers see: an http(s) URL with a host, or a same-origin path (`/pay` in the demo profile, ADR 0016) |
 | `MOCKPAY_API_KEY` | `dev-mockpay-key` | | |
 | `PSP_MAX_CONNS` | `64` | `64` | PSP client connection pool bound per api/worker process; `psp_conn_wait_seconds` shows queueing |
 | `MOCKPAY_WEBHOOK_SECRET` | `dev-webhook-secret` | | |
 | `PUBLIC_WEBHOOK_URL` | `http://localhost:8080/api/v1/webhooks/mockpay` | `http://caddy:8000/api/v1/webhooks/mockpay` | Where MockPay delivers |
-| `PUBLIC_APP_URL` | `http://localhost:3000` | `http://localhost:8000` | Web app origin; the hosted checkout returns to `<PUBLIC_APP_URL>/order?o=<order_id>` (ADR 0007) |
+| `PUBLIC_APP_URL` | `http://localhost:3000` | `http://localhost:8000` | Web app origin, or a same-origin path (`/` in the demo profile, ADR 0016); the hosted checkout returns to `<PUBLIC_APP_URL>/order?o=<order_id>` (ADR 0007) |
 | `MOCKPAY_LATENCY_MS` | `20-60` | `20-60` | Uniform per call |
 | `MOCKPAY_FAIL_RATE` | `0` | `0.02` | Random 5xx before commit |
 | `MOCKPAY_TIMEOUT_AFTER_COMMIT_RATE` | `0` | `0.02` | Commit, then respond after `MOCKPAY_HANG_MS` |
@@ -188,7 +190,7 @@ sluice/
 | `MOCKPAY_WEBHOOK_DUP_RATE` | `0` | `0.10` | |
 | `MOCKPAY_WEBHOOK_REORDER_RATE` | `0` | `0.05` | |
 | `MOCKPAY_WEBHOOK_MAX_DELAY_MS` | `0` | `2000` | |
-| `DEMO_MODE` | `false` | | Enables `/demo/rush` and live-demo guards |
+| `DEMO_MODE` | `false` | | Reserved for `/demo/rush` (P8b); nothing reads it yet (ADR 0016). `true` in the demo profile |
 | `TEST_ENDPOINTS_ENABLED` | `false` | `true` | `/test/*` endpoints; refused unless `APP_ENV` is `rush` or `test` |
 | `NEXT_PUBLIC_API_BASE_URL` | `http://localhost:8080` | *(empty)* | Web dev only; production builds use same-origin `/api` |
 

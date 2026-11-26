@@ -68,7 +68,7 @@ The client-observable outcomes of a rush (sold out, taken, rate-limited) are **n
 | Method | Path | Auth | IK | Purpose |
 |---|---|---|---|---|
 | GET | `/healthz` | — | | Liveness (always 200 while the process runs) |
-| GET | `/api/v1/healthz` | — | | Same as `/healthz`, reachable through Caddy. Returns `{"status":"ok","mode":"live"}` (`"demo"` once demo mode lands in P7; Rush Control shows "Start a demo rush" only then). The web app uses it to detect LIVE vs REPLAY |
+| GET | `/api/v1/healthz` | — | | Same as `/healthz`, reachable through Caddy. Returns `{"status":"ok","mode":"live"}` in every profile for now (`"demo"` once the demo rush lands in P8b, ADR 0016; Rush Control shows "Start a demo rush" only then). The web app uses it to detect LIVE vs REPLAY |
 | GET | `/readyz` | — | | Readiness (PG + Redis reachable, migrations applied). Served from a cached state refreshed in the background (≤ 1 s old) over dedicated health connections, so a busy replica still answers fast; 503 while draining on shutdown (ADR 0013) |
 | POST | `/api/v1/sessions` | — | | Create an anonymous user + session token |
 | GET | `/api/v1/events` | — | | List events (+ status, sale times, counts) |
@@ -90,7 +90,7 @@ The client-observable outcomes of a rush (sold out, taken, rate-limited) are **n
 | POST | `/api/v1/admin/events/{eventId}/rebuild-cache` | admin | | Rebuild Redis from PG (R1) |
 | POST | `/api/v1/admin/events/{eventId}/open-sale` | admin | | `{ "opens_in_s": 0..86400 }` sets T0 = now + N and status SCHEDULED → 200 `{event_id, sale_opens_at, status}`. Only while nobody holds a ticket or lottery entry, else 409 `EVENT_STATE` (ADR 0009) |
 | POST | `/api/v1/admin/reconcile` | admin | | Run reconciliation now (the auditor's settle step), synchronously → 200 `{orphans_fixed, duplicates_fixed, converged, captures_requeued, dead_holds_settled, inventory_repaired}`; 503 if a step failed |
-| POST | `/api/v1/demo/rush` | — (rate-limited) | | Demo mode only: `{ "bots": 2000, "opens_in_s": 20 }` → 202 |
+| POST | `/api/v1/demo/rush` | — (rate-limited) | | **Not built yet (P8b, ADR 0016).** Demo mode only: `{ "bots": 2000, "opens_in_s": 20 }` → 202 |
 | POST | `/api/v1/test/admit` | — | | Test/rush only: `{ "event_id", "user_id" }` → admission token |
 
 Per-route rate limits (when `RATE_LIMITS_ENABLED`): sessions 20/min/IP; join 6/min/user and 30/min/IP; status 3/s/user (burst 6, in-process); holds 20/min/user; orders, pay and confirm 10/min/user each (new payment attempts share the pay bucket); demo rush 1 per 2 min globally (P7). Redis GCRA (go-redis/redis_rate), shared by all replicas; burst = the per-minute count. The user is the verified token subject (any audience); a request without a valid token skips user rules and is then rejected by auth. The client IP is the peer, or, when the peer is in `TRUSTED_PROXIES`, the right-most `X-Forwarded-For` entry that is not a trusted proxy. If Redis fails the check, the request passes (fail open; `ratelimit_decisions_total{result="error"}`). The status limiter keeps at most 200,000 users per replica (sharded LRU). `POST /queue` answers 503 `DEPENDENCY_UNAVAILABLE` (Retry-After 1) if the queue counters cannot be restored (ADR 0009).
@@ -151,7 +151,7 @@ Errors: `SEATS_TAKEN{taken}`, `INSUFFICIENT_SEATS{available}`, `SOLD_OUT`, `HOLD
   "payment": { "attempt": 1, "status": "CREATED", "intent_id": "pi_...", "checkout_url": "http://localhost:8000/pay/checkout/pi_..." },
   "charged": false, "tickets": [], "failure_code": null }
 ```
-Creating the order moves the hold to PAYMENT_PENDING with `PAYMENT_HOLD_TTL`. A retry with the same IK replays, and a second order for the same hold returns the existing order (`hold_id` is unique). `checkout_url` is `MOCKPAY_PUBLIC_URL + "/checkout/" + intent_id` and is present only while the order is PENDING_PAYMENT and the attempt is CREATED. With `QUEUE_ENFORCED=true` this route needs the admission token for the hold's event (another event's token: 401 `TOKEN_INVALID`); otherwise a session token also works.
+Creating the order moves the hold to PAYMENT_PENDING with `PAYMENT_HOLD_TTL`. A retry with the same IK replays, and a second order for the same hold returns the existing order (`hold_id` is unique). `checkout_url` is `MOCKPAY_PUBLIC_URL + "/checkout/" + intent_id` (a same-origin path such as `/pay/checkout/pi_...` in the demo profile, ADR 0016) and is present only while the order is PENDING_PAYMENT and the attempt is CREATED. With `QUEUE_ENFORCED=true` this route needs the admission token for the hold's event (another event's token: 401 `TOKEN_INVALID`); otherwise a session token also works.
 
 Every order route (`POST /orders`, `/pay`, `/payments`, `/confirm`, `GET /orders/{id}`) returns this same order view. `/payments` (new attempt) needs the last attempt FAILED or VOIDED, the hold live, and at most 3 attempts (else 409 `ORDER_STATE` / 409 `HOLD_EXPIRED` / 422 `PAYMENT_ATTEMPTS_EXHAUSTED`). A PSP that is down gives 503 `DEPENDENCY_UNAVAILABLE` with `Retry-After`; the Idempotency-Key is released, so the retry runs again with the same deterministic PSP keys.
 
@@ -188,7 +188,7 @@ Each API replica serves this from an in-memory cache. It re-checks each event at
   "correctness": { "oversold": 0, "duplicate_charges": 0, "orphan_charges": 0, "checked_at": "..." },
   "demo_rush": { "running": false } }
 ```
-Each replica recomputes the body at most once per second per event (`Cache-Control: public, max-age=1`). `event_status` and `sale_opens_at` come from PG; `queue` from the replica's queue snapshot (≤ 1 s old): `joined` = presize + tail (before the freeze: lottery entries), `waiting` = joined − cursor (users who left are not subtracted); `inventory` from the live seat counts; `correctness` from the worker's `sl:{e}:audit` hash (refreshed every 5 s for ON_SALE events; all four fields `null` when there is none). `sold_out_at` is always `null` for now: no column records it (ADR 0009). `demo_rush` is fixed until demo mode lands (P7).
+Each replica recomputes the body at most once per second per event (`Cache-Control: public, max-age=1`). `event_status` and `sale_opens_at` come from PG; `queue` from the replica's queue snapshot (≤ 1 s old): `joined` = presize + tail (before the freeze: lottery entries), `waiting` = joined − cursor (users who left are not subtracted); `inventory` from the live seat counts; `correctness` from the worker's `sl:{e}:audit` hash (refreshed every 5 s for ON_SALE events; all four fields `null` when there is none). `sold_out_at` is always `null` for now: no column records it (ADR 0009). `demo_rush` is fixed until the demo rush lands (P8b, ADR 0016).
 
 ### 3.10 `GET /events` → 200
 ```json
@@ -237,7 +237,7 @@ Types: `intent.authorized`, `intent.failed`, `intent.captured`, `intent.canceled
 | POST | `/v1/intents/{id}/refund` | IK |
 | GET | `/v1/ledger/summary?metadata.event_id=&since=` | For the auditor: `{"refs": [{merchant_ref, intents, authorized, captured, voided, refunded}]}`, counts of intents with each ledger entry kind |
 | GET | `/checkout/{id}` | Hosted page with a **TEST MODE** banner. Buttons: Pay (pm_ok), Decline (pm_decline), Simulate timeout (pm_timeout) |
-| POST | `/checkout/{id}/pay` | Form or JSON `{payment_method}` → authorize and 303 to `return_url` with `order=<merchant_ref>&intent=<id>&status=<intent status>` added (SLUICE's own `return_url` already carries `o=<order_id>` for the web page). Internal key `checkout:<id>:<method>`, so a double click replays |
+| POST | `/checkout/{id}/pay` | Form or JSON `{payment_method}` → authorize and 303 to `return_url` with `order=<merchant_ref>&intent=<id>&status=<intent status>` added (SLUICE's own `return_url` already carries `o=<order_id>` for the web page). `return_url` must be an absolute http(s) URL or a same-origin path like `/order?o=...`; anything else, including `//host`, gets no link and no redirect (ADR 0016). Internal key `checkout:<id>:<method>`, so a double click replays |
 | GET | `/metrics`, `/healthz` | |
 
 MockPay semantics:

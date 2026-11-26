@@ -134,9 +134,18 @@ func (s *Server) renderCheckout(w http.ResponseWriter, in mpdb.Intent) {
 }
 
 // returnURL appends order, intent and status to the merchant's return_url.
+// It must be an absolute http(s) URL or a same-origin absolute path (the
+// live demo behind a tunnel, ADR 0016); anything else, including
+// protocol-relative "//host", gives "" (no link, no redirect).
 func returnURL(base string, in mpdb.Intent) string {
 	u, err := url.Parse(base)
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+	if err != nil {
+		return ""
+	}
+	absolute := (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
+	samePath := u.Scheme == "" && u.Host == "" && strings.HasPrefix(base, "/") &&
+		!strings.HasPrefix(base, "//") && !strings.HasPrefix(base, "/\\")
+	if !absolute && !samePath {
 		return ""
 	}
 	q := u.Query()

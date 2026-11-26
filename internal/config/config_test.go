@@ -140,6 +140,11 @@ func TestLoadRejects(t *testing.T) {
 		{"latency inverted", map[string]string{"MOCKPAY_LATENCY_MS": "60-20"}, "MOCKPAY_LATENCY_MS"},
 		{"latency garbage", map[string]string{"MOCKPAY_LATENCY_MS": "fast"}, "MOCKPAY_LATENCY_MS"},
 		{"mockpay key too short", map[string]string{"MOCKPAY_API_KEY": "abc"}, "MOCKPAY_API_KEY"},
+		{"public url protocol-relative", map[string]string{"MOCKPAY_PUBLIC_URL": "//evil.test/pay"}, "MOCKPAY_PUBLIC_URL"},
+		{"public url backslash host", map[string]string{"PUBLIC_APP_URL": "/\\evil.test"}, "PUBLIC_APP_URL"},
+		{"public url bare relative", map[string]string{"MOCKPAY_PUBLIC_URL": "pay"}, "MOCKPAY_PUBLIC_URL"},
+		{"public url wrong scheme", map[string]string{"PUBLIC_APP_URL": "javascript:alert(1)"}, "PUBLIC_APP_URL"},
+		{"public url no host", map[string]string{"PUBLIC_APP_URL": "https:///x"}, "PUBLIC_APP_URL"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -151,6 +156,25 @@ func TestLoadRejects(t *testing.T) {
 				t.Fatalf("error %q does not mention %s", err, tc.wantKey)
 			}
 		})
+	}
+}
+
+// The demo profile serves MockPay and the app same-origin behind a tunnel
+// whose host is random, so both public URLs may be absolute paths (ADR 0016).
+func TestPublicURLsAcceptSameOriginPaths(t *testing.T) {
+	tests := []struct{ mockpay, app string }{
+		{"/pay", "/"},
+		{"/pay/", "/app"},
+		{"https://pay.example.test", "http://localhost:8000"},
+	}
+	for _, tc := range tests {
+		c, err := Load(env(map[string]string{"MOCKPAY_PUBLIC_URL": tc.mockpay, "PUBLIC_APP_URL": tc.app}))
+		if err != nil {
+			t.Fatalf("Load(%q, %q): %v", tc.mockpay, tc.app, err)
+		}
+		if c.MockpayPublicURL != tc.mockpay || c.PublicAppURL != tc.app {
+			t.Errorf("got %q %q, want %q %q", c.MockpayPublicURL, c.PublicAppURL, tc.mockpay, tc.app)
+		}
 	}
 }
 
@@ -204,6 +228,54 @@ func TestEnvExampleCoversConfig(t *testing.T) {
 	}
 }
 
+// TestDemoEnvExample checks the live-demo profile (DEPLOY.md B, ADR 0016):
+// it sets every variable except the in-network datastore URLs that
+// compose.app.yml provides, it refuses to boot until task demo has replaced
+// the placeholders, and once generated it loads with every unsafe mode off.
+func TestDemoEnvExample(t *testing.T) {
+	const placeholder = "generate-with-task-demo"
+	demo := readEnvFile(t, "deploy/env/demo.env.example")
+	composeSets := []string{"DATABASE_URL", "MOCKPAY_DATABASE_URL", "REDIS_URL"}
+	for _, k := range Keys() {
+		if _, ok := demo[k]; !ok && !slices.Contains(composeSets, k) {
+			t.Errorf("demo.env.example is missing %s", k)
+		}
+	}
+	if _, err := Load(env(demo)); err == nil {
+		t.Fatal("demo.env.example must not load with its placeholders left in")
+	}
+	secret := strings.Repeat("A", 43) + "=" // base64 of 32 zero bytes
+	for k, v := range demo {
+		if strings.Contains(v, placeholder) {
+			demo[k] = strings.ReplaceAll(v, placeholder, secret)
+		}
+	}
+	c, err := Load(env(demo))
+	if err != nil {
+		t.Fatalf("generated demo profile does not load: %v", err)
+	}
+	checks := []struct {
+		name      string
+		got, want any
+	}{
+		{"AppEnv", c.AppEnv, EnvDemo},
+		{"TestEndpointsEnabled", c.TestEndpointsEnabled, false},
+		{"QueueEnforced", c.QueueEnforced, true},
+		{"Baseline", c.Baseline, BaselineOff},
+		{"RateLimitsEnabled", c.RateLimitsEnabled, true},
+		{"PprofAddr", c.PprofAddr, ""},
+		{"HoldTTL", c.HoldTTL, 5 * time.Minute},
+		{"PaymentHoldTTL", c.PaymentHoldTTL, 10 * time.Minute},
+		{"MockpayPublicURL", c.MockpayPublicURL, "/pay"},
+		{"PublicAppURL", c.PublicAppURL, "/"},
+	}
+	for _, ck := range checks {
+		if ck.got != ck.want {
+			t.Errorf("%s = %v, want %v", ck.name, ck.got, ck.want)
+		}
+	}
+}
+
 // TestEnvExampleMatchesStackDoc keeps .env.example in sync with STACK.md §4.
 func TestEnvExampleMatchesStackDoc(t *testing.T) {
 	example := readEnvExample(t)
@@ -237,9 +309,15 @@ func TestEnvExampleMatchesStackDoc(t *testing.T) {
 
 func readEnvExample(t *testing.T) map[string]string {
 	t.Helper()
-	f, err := os.Open(filepath.Join(repoRoot(t), ".env.example"))
+	return readEnvFile(t, ".env.example")
+}
+
+// readEnvFile parses a KEY=value file relative to the repo root.
+func readEnvFile(t *testing.T, rel string) map[string]string {
+	t.Helper()
+	f, err := os.Open(filepath.Join(repoRoot(t), filepath.FromSlash(rel)))
 	if err != nil {
-		t.Fatalf("open .env.example: %v", err)
+		t.Fatalf("open %s: %v", rel, err)
 	}
 	defer func() { _ = f.Close() }()
 	out := map[string]string{}
@@ -251,15 +329,15 @@ func readEnvExample(t *testing.T) map[string]string {
 		}
 		k, v, ok := strings.Cut(line, "=")
 		if !ok || strings.Contains(v, " #") {
-			t.Fatalf(".env.example:%d: want KEY=value with comments on their own line, got %q", n, line)
+			t.Fatalf("%s:%d: want KEY=value with comments on their own line, got %q", rel, n, line)
 		}
 		if _, dup := out[k]; dup {
-			t.Fatalf(".env.example:%d: duplicate key %s", n, k)
+			t.Fatalf("%s:%d: duplicate key %s", rel, n, k)
 		}
 		out[k] = v
 	}
 	if err := sc.Err(); err != nil {
-		t.Fatalf("scan .env.example: %v", err)
+		t.Fatalf("scan %s: %v", rel, err)
 	}
 	return out
 }

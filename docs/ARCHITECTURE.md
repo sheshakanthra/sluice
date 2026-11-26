@@ -15,7 +15,7 @@ flowchart LR
   A1 & A2 & A3 --> P[(Postgres 18<br/>source of truth,<br/>River job tables)]
   A1 & A2 & A3 -->|PSP API| M
   M -->|signed webhooks| C
-  W[worker<br/>admission ticks, sweeper,<br/>River jobs, reconciler,<br/>demo bots] --> R & P & M
+  W[worker<br/>admission ticks, sweeper,<br/>River jobs, reconciler,<br/>demo bots: P8b] --> R & P & M
   M --> MP[(Postgres<br/>mockpay DB)]
   PR[Prometheus] -.scrape.-> A1 & A2 & A3 & W & M
   G[Grafana] --> PR
