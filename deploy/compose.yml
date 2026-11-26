@@ -20,7 +20,11 @@ services:
       - pgdata:/var/lib/postgresql
       - ./postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U sluice -d sluice"]
+      # TCP, not the Unix socket: during first-start initdb the entrypoint's
+      # temporary server answers on the socket only, so a socket probe went
+      # healthy before the real server listened (P7b: migrate got
+      # "connection refused" on a fresh stack).
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U sluice -d sluice"]
       interval: 2s
       timeout: 3s
       retries: 30

@@ -141,11 +141,12 @@ Scenario env overlays: `deploy/env/rush.b0.env`, `rush.b1.env`, `rush.b2.env` (s
   1. Checkout, set up Go, install Task.
   2. Tune the host:
      `sudo sysctl -w net.core.somaxconn=65535 net.ipv4.tcp_max_syn_backlog=65535 net.ipv4.ip_local_port_range="1024 65535" net.ipv4.tcp_tw_reuse=1 fs.file-max=2000000`
-  3. `docker compose build`, then `task stack:up ENV=rush`.
-  4. `task rush SCENARIO=... USERS=...`, then `task audit`.
-  5. Upload `loadtest/results/<run_id>` as an artifact.
-  6. Write `report.md` to `$GITHUB_STEP_SUMMARY` (public proof on the run page).
-  7. Fail the job if the audit fails or there are unresolved users.
+  3. `docker compose build` (the images, as a separate timed step).
+  4. The scenario's task (`task rush` / `rush:smoke` / `rush:b0` / `rush:b1` / `rush:b2` with `ENV=rush USERS=... RUN_ID=ci-<run id>-<scenario>-<users>`). It starts from a fresh stack, seeds, runs the swarm and then the auditor (`sluice rush --audit`), so there is no separate `stack:up` or `task audit` step (ADR 0015).
+  5. Upload `loadtest/results/<run_id>` as an artifact, plus `runner.md`, `stack.log.gz`, `ps.txt` and `verdict.md`.
+  6. Write `runner.md` + `report.md` + the verdict to `$GITHUB_STEP_SUMMARY` (public proof on the run page).
+  7. Gate with `loadtest/ci/verdict.py`: H/SMOKE/B2 fail on any audit count ≠ 0, a failed or unsettled audit, or unresolved users. B0/B1 fail when the expected bugs are **not** detected (B0: oversold > 0 and duplicate charges > 0; B1: oversold = 0 and duplicate charges > 0) or users are unresolved. Latency SLOs are reported, never gating.
+- How to read the artifact: `docs/results/README.md`.
 - CI never commits or pushes anything. Sheshakanth copies the curated results in P8.
 
 ## 8. Tuning loop (P7)

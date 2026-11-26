@@ -1,0 +1,20 @@
+GC cycles in window
+  api1:8080=78.63; api2:8080=81.53; api3:8080=78.28; caddy:9180=58.55; localhost:9090=5.105; mockpay:8090=29.36; worker:9091=42.53
+peak GC cycles/s (30s rate)
+  api1:8080=1.96; api2:8080=2.08; api3:8080=1.88; caddy:9180=0.9601; localhost:9090=0.08924; mockpay:8090=0.84; worker:9091=0.72
+GC pause seconds total in window
+  api1:8080=0.3067; api2:8080=0.3018; api3:8080=0.2628; caddy:9180=0.1414; localhost:9090=0.006774; mockpay:8090=0.1087; worker:9091=0.07666
+max GC pause s
+  
+max heap alloc MiB
+  api1:8080=46.38; api2:8080=48.28; api3:8080=44.31; caddy:9180=147.1; localhost:9090=46.62; mockpay:8090=18.43; worker:9091=16.97
+GOMEMLIMIT MiB
+  Traceback (most recent call last):
+  File "<string>", line 1, in <module>
+    import json,sys; print('; '.join(f"{r['metric'].get('instance','?')}={float(r['value'][1]):.4g}" for r in sorted(json.load(sys.stdin)['data']['result'],key=lambda r:r['metric'].get('instance',''))))
+                                                                                                                     ~~~~~~~~~~~~~~~~~~~~^^^^^^^^
+KeyError: 'data'
+GOGC
+  api1:8080=100; api2:8080=100; api3:8080=100; caddy:9180=100; localhost:9090=75; mockpay:8090=100; worker:9091=100
+max CPU cores (1m rate)
+  api1:8080=0.7345; api2:8080=0.7337; api3:8080=0.7212; caddy:9180=1.862; localhost:9090=0.0272; mockpay:8090=0.2984; worker:9091=0.242
