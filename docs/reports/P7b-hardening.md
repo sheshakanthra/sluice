@@ -183,3 +183,23 @@ git add -A
 git status --short
 git commit -m "ci(rush): headline rush workflow, CI verdict gate, results guide" -m "- rush.yml: workflow_dispatch scenario and users, sysctl tuning, artifact, job summary" -m "- verdict.py: invariants gate H SMOKE B2, expected-bug gate for B0 and B1" -m "- docs/results/README.md explains every summary.json field" -m "- Postgres healthcheck over TCP to avoid the initdb startup race" -m "- Step 0: pre-P7a control no faster, GC ruled out, laptop too noisy" -m "Phase P7b - report: docs/reports/P7b-hardening.md"
 ```
+
+## 11. Post-report CI fix (2026-11-26, after the first CI run)
+**What failed:** the first CI rush, run `45766424648` (SMOKE, 5,000 users), failed **after** the swarm and the audit had finished, in two publishing steps:
+- "Job summary and verdict": `cat: loadtest/results/ci-45766424648-smoke-5000/report.md: Permission denied`, exit 1.
+- "Upload results": `EACCES: permission denied, open '.../loadtest/results/ci-45766424648-smoke-5000/audit.json'`.
+
+That run's verdict is therefore unknown; it is not counted as a pass or a fail of the system.
+
+**Cause:** the `rush` and `audit` containers run as the image's distroless `nonroot` user (uid 65532), not as the runner user (uid 1001). They also wrote every result with mode `0600` (`summary.json`, `timeseries.csv` via `os.Create` + umask, `report.md`, `audit.json`) inside directories created with `0750`. So the runner could open neither the files nor the run directory. The old `chmod 0777 loadtest/results` covered only the parent directory. §2's "only a CI run can verify the workflow end to end" is where this would have been caught.
+
+**Fix (no rush logic, gate rule or threshold changed):**
+1. **Run as the host user.** `deploy/compose.rush.yml`: `rush` and `audit` run with `user: "${SLUICE_UID:-65532}:${SLUICE_GID:-65532}"`. CI's "Prepare bind mounts" step writes `SLUICE_UID=$(id -u)` and `SLUICE_GID=$(id -g)` to `$GITHUB_ENV`; locally nothing changes. Checked with `docker compose ... --profile rush config`: `user: 1001:118` with the variables set, `user: 65532:65532` without.
+2. **World-readable results.** `internal/rush/report.go` and `internal/audit/audit.go` write result files `0644` and directories `0755` (constants `resultFileMode` and `resultDirMode`; `writeCSV` now passes the mode explicitly). They are public run artifacts with no secrets. New test `TestWriteOutputsModes` passes on Linux (`docker run golang:1.27.4 ... go test -run TestWriteOutputsModes ./internal/rush` → `ok`) and skips on Windows.
+3. **`rush.yml` normalizes ownership.** A new `if: always()` step, "Make results readable by the runner", runs `sudo chown -R "$(id -u):$(id -g)" loadtest/results && chmod -R a+rX loadtest/results` after "Rush and audit" and before collecting logs, the summary and the upload. The log-collection step no longer needs `sudo` or `0777`.
+4. **Named failures, partial summaries.**
+   - `loadtest/ci/verdict.py` reports a missing, unreadable or malformed `summary.json` by name, in the summary and on stderr, then exits 1. It was checked as user `nobody` in `python:3.13-slim`: present → `**PASS**` exit 0; missing → `` `…/summary.json` was not written `` exit 1; invalid JSON → `is not valid JSON (line 2: Expecting value)` exit 1; root-owned 0600 → `is not readable by this user (Permission denied)` exit 1.
+   - The summary step writes `runner.md` and `report.md` when it can, or a **Missing:**/**Unreadable:** line naming the file (with owner and mode). It always runs the verdict, adds a `::error::` annotation for each problem, and exits 1 if anything was missing. The step script, extracted from `rush.yml` and run on Linux, gave: report.md missing → exit 1 with `::error::loadtest/results/r1/report.md was not written`; report.md root 0600 → exit 1 with `... is not readable by nobody (root:root 600)`; all present → exit 0.
+5. Collecting `stack.log.gz`, the summary and the upload all run with `if: always()`; they already did, and the new step does too.
+
+**Checks:** `docker run --rm -v "<repo>:/repo" -w /repo rhysd/actionlint:1.7.7 -no-color -verbose` → `Found 0 errors in 2 files`; `task lint` → `0 issues.`; `CGO_ENABLED=1 go test -race -count=1 ./internal/rush ./internal/audit` → both `ok`. The fix itself is only proven by the next CI run: re-run `rush` with SMOKE 5000, then H 50000.

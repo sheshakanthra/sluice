@@ -360,25 +360,33 @@ func (s *swarm) timeseries(rows map[int]statsRow) [][]string {
 }
 
 // writeOutputs writes summary.json, timeseries.csv and report.md into dir.
+// Results are public run artifacts (no secrets). The CI runner user is not
+// the container user and must read them to publish the job summary and the
+// artifact, so files are 0644 and directories 0755 (P7b post-report CI fix).
+const (
+	resultFileMode os.FileMode = 0o644
+	resultDirMode  os.FileMode = 0o755
+)
+
 func writeOutputs(dir string, sum *Summary, ts [][]string) error {
-	if err := os.MkdirAll(dir, 0o750); err != nil {
+	if err := os.MkdirAll(dir, resultDirMode); err != nil {
 		return fmt.Errorf("create %s: %w", dir, err)
 	}
 	js, err := json.MarshalIndent(sum, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "summary.json"), append(js, '\n'), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "summary.json"), append(js, '\n'), resultFileMode); err != nil {
 		return err
 	}
 	if err := writeCSV(filepath.Join(dir, "timeseries.csv"), ts); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, "report.md"), []byte(RenderReport(sum)), 0o600)
+	return os.WriteFile(filepath.Join(dir, "report.md"), []byte(RenderReport(sum)), resultFileMode)
 }
 
 func writeCSV(path string, rows [][]string) error {
-	f, err := os.Create(filepath.Clean(path))
+	f, err := os.OpenFile(filepath.Clean(path), os.O_WRONLY|os.O_CREATE|os.O_TRUNC, resultFileMode)
 	if err != nil {
 		return err
 	}
@@ -522,10 +530,10 @@ func ApplyAudit(dir string, a *SummaryAudit) (*Summary, error) {
 	if err != nil {
 		return nil, fmt.Errorf("rush: encode summary: %w", err)
 	}
-	if err := os.WriteFile(path, append(out, '\n'), 0o600); err != nil {
+	if err := os.WriteFile(path, append(out, '\n'), resultFileMode); err != nil {
 		return nil, fmt.Errorf("rush: write summary: %w", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "report.md"), []byte(RenderReport(&sum)), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "report.md"), []byte(RenderReport(&sum)), resultFileMode); err != nil {
 		return nil, fmt.Errorf("rush: write report: %w", err)
 	}
 	return &sum, nil

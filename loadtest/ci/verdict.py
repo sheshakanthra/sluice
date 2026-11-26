@@ -14,7 +14,8 @@ exits 0 when the run meets its scenario's rule, 1 otherwise:
   A baseline that shows no bug means the auditor is blind, so it fails.
 
 Latency SLOs are goals, not gates (SPEC §7): they are reported, never fail CI.
-Reads only summary.json; it never changes anything in the repo.
+Reads only summary.json; it never changes anything in the repo. A missing,
+unreadable or malformed summary.json is named in the output and exits 1.
 """
 
 import json
@@ -50,6 +51,23 @@ def get(d, path):
     return d
 
 
+def load_summary(path):
+    """Returns (summary, None), or (None, why) when the file is missing,
+    unreadable (for example written by another user with mode 0600) or not
+    valid JSON."""
+    if not os.path.exists(path):
+        return None, "was not written"
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f), None
+    except PermissionError as e:
+        return None, f"is not readable by this user ({e.strerror})"
+    except json.JSONDecodeError as e:
+        return None, f"is not valid JSON (line {e.lineno}: {e.msg})"
+    except OSError as e:
+        return None, f"could not be read ({e.strerror})"
+
+
 def main() -> int:
     if len(sys.argv) != 4:
         print(__doc__, file=sys.stderr)
@@ -57,11 +75,12 @@ def main() -> int:
     results, scenario, rush_exit = sys.argv[1], sys.argv[2].upper(), int(sys.argv[3])
     path = os.path.join(results, "summary.json")
     print(f"## CI verdict ({scenario})\n")
-    if not os.path.exists(path):
-        print(f"**FAIL**: `{path}` was not written (rush exit {rush_exit}).")
+    s, problem = load_summary(path)
+    if problem:
+        # The job summary gets the reason; the step log gets it on stderr.
+        print(f"**FAIL**: `{path}` {problem} (rush exit {rush_exit}).")
+        print(f"error: {path}: {problem}", file=sys.stderr)
         return 1
-    with open(path, encoding="utf-8") as f:
-        s = json.load(f)
     a = s.get("audit") or {}
     reasons = []
 

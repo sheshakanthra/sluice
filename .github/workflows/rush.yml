@@ -77,12 +77,18 @@ jobs:
           sudo sysctl -w net.core.somaxconn=65535 net.ipv4.tcp_max_syn_backlog=65535 \
             net.ipv4.ip_local_port_range="1024 65535" net.ipv4.tcp_tw_reuse=1 fs.file-max=2000000
 
-      # The containers run as distroless nonroot (uid 65532) and write
-      # results into this bind mount; Caddy mounts web/out (gitignored).
+      # The rush and audit containers write results into this bind mount.
+      # They run as the runner's uid/gid (compose.rush.yml reads SLUICE_UID
+      # and SLUICE_GID), so the runner can read what they write. Caddy
+      # mounts web/out (gitignored).
       - name: Prepare bind mounts
         run: |
+          {
+            echo "SLUICE_UID=$(id -u)"
+            echo "SLUICE_GID=$(id -g)"
+          } >> "$GITHUB_ENV"
           mkdir -p loadtest/results web/out
-          chmod 0777 loadtest/results
+          chmod 0755 loadtest/results
 
       - name: Record the runner
         env:
@@ -122,13 +128,21 @@ jobs:
           # The verdict step decides pass/fail (baselines are expected to exit 1).
           exit 0
 
+      # Belt and braces for the run-as-host-user setting above: whatever a
+      # container wrote (any owner, any mode), the runner owns and can read it
+      # before the summary, the verdict and the upload touch it.
+      - name: Make results readable by the runner
+        if: always()
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" loadtest/results && chmod -R a+rX loadtest/results
+
       - name: Collect stack logs and runner info
         if: always()
         env:
           RUN_ID: ${{ steps.params.outputs.run_id }}
         run: |
           dir="loadtest/results/$RUN_ID"
-          sudo mkdir -p "$dir" && sudo chmod 0777 "$dir"
+          mkdir -p "$dir"
           cp runner.md "$dir/runner.md"
           docker compose -f deploy/compose.yml -f deploy/compose.app.yml -f deploy/compose.rush.yml \
             logs --no-color --timestamps > "$dir/stack.log" 2>&1 || true
@@ -143,20 +157,35 @@ jobs:
           RUN_ID: ${{ steps.params.outputs.run_id }}
           RUSH_EXIT: ${{ steps.rush.outputs.exit_code || '99' }}
         run: |
-          dir="loadtest/results/$RUN_ID"
-          {
-            cat runner.md
-            echo
-            if [ -f "$dir/report.md" ]; then cat "$dir/report.md"; else echo "_report.md was not written_"; fi
-            echo
-          } >> "$GITHUB_STEP_SUMMARY"
           set +e
+          dir="loadtest/results/$RUN_ID"
+          problems=()
+          # Append a required file to the summary, or name why it can't be.
+          section() {
+            if [ ! -e "$1" ]; then
+              problems+=("$1 was not written")
+              echo "**Missing:** \`$1\` was not written."
+            elif [ ! -r "$1" ]; then
+              problems+=("$1 is not readable by $(id -un) ($(stat -c '%U:%G %a' "$1"))")
+              echo "**Unreadable:** \`$1\` ($(stat -c '%U:%G %a' "$1"))."
+            else
+              cat "$1"
+            fi
+            echo
+          }
+          {
+            section runner.md
+            section "$dir/report.md"
+          } >> "$GITHUB_STEP_SUMMARY"
           python3 loadtest/ci/verdict.py "$dir" "$SCENARIO" "$RUSH_EXIT" > verdict.md
           code=$?
           cat verdict.md
           cat verdict.md >> "$GITHUB_STEP_SUMMARY"
-          cp verdict.md "$dir/verdict.md"
-          exit $code
+          cp verdict.md "$dir/verdict.md" || problems+=("could not copy verdict.md into $dir")
+          for p in "${problems[@]}"; do echo "::error::$p"; done
+          if [ "$code" -ne 0 ]; then exit "$code"; fi
+          if [ "${#problems[@]}" -gt 0 ]; then exit 1; fi
+          exit 0
 
       # LOADTEST §7 step 5.
       - name: Upload results

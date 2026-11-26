@@ -258,15 +258,22 @@ func Run(ctx context.Context, o *Options, stdout io.Writer) (*Report, error) {
 	return rep, nil
 }
 
+// audit.json is a public run artifact (no secrets) that the CI runner user,
+// not the container user, must read: files 0644, directories 0755.
+const (
+	resultFileMode os.FileMode = 0o644
+	resultDirMode  os.FileMode = 0o755
+)
+
 func writeJSON(path string, v any) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), resultDirMode); err != nil {
 		return fmt.Errorf("audit: %w", err)
 	}
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return fmt.Errorf("audit: %w", err)
 	}
-	if err := os.WriteFile(path, append(b, '\n'), 0o600); err != nil {
+	if err := os.WriteFile(path, append(b, '\n'), resultFileMode); err != nil {
 		return fmt.Errorf("audit: %w", err)
 	}
 	return nil

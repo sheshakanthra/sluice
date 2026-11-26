@@ -10,6 +10,10 @@ services:
     image: sluice:local
     profiles: ["rush"]
     entrypoint: ["/usr/local/bin/sluice", "rush"]
+    # Results land in the ../loadtest/results bind mount: write them as the
+    # host user so the host (the CI runner) can read and upload them. CI sets
+    # SLUICE_UID/SLUICE_GID; elsewhere the image's nonroot user (65532) stays.
+    user: "${SLUICE_UID:-65532}:${SLUICE_GID:-65532}"
     command: ["--target", "http://caddy:8000", "--scenario", "SMOKE"]
     env_file:
       - env/${SLUICE_ENV:-rush}.env
@@ -48,6 +52,8 @@ services:
     image: sluice:local
     profiles: ["rush"]
     entrypoint: ["/usr/local/bin/sluice", "audit"]
+    # Writes audit.json into the results bind mount; same rule as rush.
+    user: "${SLUICE_UID:-65532}:${SLUICE_GID:-65532}"
     env_file:
       - env/${SLUICE_ENV:-rush}.env
       - path: env/${SLUICE_ENV:-rush}.${SLUICE_SCENARIO:-none}.env
