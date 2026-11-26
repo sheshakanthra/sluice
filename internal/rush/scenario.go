@@ -142,6 +142,11 @@ func uniform(r *rand.Rand, span [2]time.Duration) time.Duration {
 	return span[0] + time.Duration(r.Int64N(int64(span[1]-span[0])))
 }
 
+// stretch returns d x U(1, 1+frac): jitter that never comes back sooner.
+func stretch(r *rand.Rand, d time.Duration, frac float64) time.Duration {
+	return time.Duration(float64(d) * (1 + frac*r.Float64()))
+}
+
 // jitter returns d ± frac·d.
 func jitter(r *rand.Rand, d time.Duration, frac float64) time.Duration {
 	return time.Duration(float64(d) * (1 - frac + 2*frac*r.Float64()))

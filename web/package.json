@@ -8,6 +8,7 @@
     "start": "npx serve@14 out",
     "lint": "eslint",
     "typecheck": "next typegen && tsc --noEmit",
+    "test": "node --test \"lib/*.test.mjs\"",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "screenshots": "node scripts/screenshots.mjs"

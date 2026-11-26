@@ -16,6 +16,10 @@ on:
         description: "Simulated users (blank = scenario default: H 50000, SMOKE 5000, B0/B1/B2 10000)"
         type: string
         default: ""
+      swarm_cpuset:
+        description: "Pin only the swarm container to these CPUs, e.g. 0 or 0-1 (blank = not pinned; report.md discloses it when set)"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -24,6 +28,8 @@ env:
   TASK_VERSION: 3.54.0
   SCENARIO: ${{ inputs.scenario }}
   USERS_INPUT: ${{ inputs.users }}
+  # Read by deploy/compose.rush.yml (cpuset) and reported in summary.json.
+  RUSH_CPUSET: ${{ inputs.swarm_cpuset }}
   # Reported in summary.json as env.runner.
   RUSH_RUNNER: github-actions-ubuntu-latest
 
@@ -61,6 +67,10 @@ jobs:
           users="${USERS_INPUT:-$default_users}"
           if ! [[ "$users" =~ ^[0-9]+$ ]] || [ "$users" -lt 1 ] || [ "$users" -gt 60000 ]; then
             echo "users must be an integer in 1..60000, got: $users" >&2
+            exit 1
+          fi
+          if ! [[ "$RUSH_CPUSET" =~ ^[0-9,-]*$ ]]; then
+            echo "swarm_cpuset must look like 0, 0-1 or 0,2; got: $RUSH_CPUSET" >&2
             exit 1
           fi
           run_id="ci-${GITHUB_RUN_ID}-${SCENARIO,,}-${users}"
@@ -104,6 +114,7 @@ jobs:
             docker compose version
             echo "commit: ${GITHUB_SHA}"
             echo "run_id: ${RUN_ID}"
+            echo "swarm_cpuset: ${RUSH_CPUSET:-not pinned}"
             echo '```'
           } | tee runner.md
 
@@ -112,6 +123,14 @@ jobs:
       # and then the auditor (`sluice rush --audit`).
       - name: Build images
         run: docker compose -f deploy/compose.yml -f deploy/compose.app.yml -f deploy/compose.rush.yml build
+
+      # Per-container CPU for every rush (P8-h50k-fix F): the diagnosis of
+      # run 45781258193 could not split CPU between the swarm and the stack.
+      # Runs in the background until the stop step below.
+      - name: Start the docker stats sampler
+        run: |
+          nohup bash loadtest/ci/dockerstats.sh "$PWD/docker-stats.csv" > /dev/null 2>&1 &
+          echo $! > dockerstats.pid
 
       - name: Rush and audit
         id: rush
@@ -127,6 +146,11 @@ jobs:
           echo "sluice rush exited $code"
           # The verdict step decides pass/fail (baselines are expected to exit 1).
           exit 0
+
+      - name: Stop the docker stats sampler
+        if: always()
+        run: |
+          if [ -f dockerstats.pid ]; then kill "$(cat dockerstats.pid)" 2>/dev/null || true; fi
 
       # Belt and braces for the run-as-host-user setting above: whatever a
       # container wrote (any owner, any mode), the runner owns and can read it
@@ -144,6 +168,10 @@ jobs:
           dir="loadtest/results/$RUN_ID"
           mkdir -p "$dir"
           cp runner.md "$dir/runner.md"
+          if [ -f docker-stats.csv ]; then
+            gzip -c docker-stats.csv > "$dir/docker-stats.csv.gz"
+            python3 loadtest/ci/cpu_summary.py docker-stats.csv > "$dir/cpu.md" || true
+          fi
           docker compose -f deploy/compose.yml -f deploy/compose.app.yml -f deploy/compose.rush.yml \
             logs --no-color --timestamps > "$dir/stack.log" 2>&1 || true
           gzip -f "$dir/stack.log"
@@ -176,6 +204,7 @@ jobs:
           {
             section runner.md
             section "$dir/report.md"
+            section "$dir/cpu.md"
           } >> "$GITHUB_STEP_SUMMARY"
           python3 loadtest/ci/verdict.py "$dir" "$SCENARIO" "$RUSH_EXIT" > verdict.md
           code=$?

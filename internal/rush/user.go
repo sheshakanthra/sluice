@@ -38,7 +38,11 @@ const (
 	maxPayAttempts  = 3
 	confirmBudget   = 3 * time.Minute
 	minPoll         = 250 * time.Millisecond
-	maxPoll         = 30 * time.Second
+	maxPoll         = 60 * time.Second // the server's own cap (API.md §3.3)
+	// pollJitter: the swarm waits retry_after x U(1, 1 + pollJitter), never
+	// sooner than the server asked; the server bounds retry_after for this
+	// (API.md §3.3, ADR 0017).
+	pollJitter = 0.1
 )
 
 // user is one simulated person.
@@ -148,7 +152,7 @@ func sendWith(ctx context.Context, c *client, q req) (result, bool) {
 		if ctx.Err() != nil {
 			return r, false
 		}
-		wait, again := retryable(&r, attempt)
+		wait, again := retryable(&r, attempt, q.floor, jitterU())
 		if !again {
 			return r, true
 		}
@@ -243,12 +247,12 @@ func (u *user) queueUp(ctx context.Context, rejoin bool) (Outcome, bool) {
 			continue
 		}
 		wait := min(max(time.Duration(v.RetryAfterMS)*time.Millisecond, minPoll), maxPoll)
-		next = next.Add(jitter(u.p.rng, wait, 0.2))
+		next = next.Add(stretch(u.p.rng, wait, pollJitter))
 		if !u.sleepUntil(ctx, next) {
 			return OutUnresolved, false
 		}
 		var st queueView
-		if st, ok = u.status(ctx, next); !ok {
+		if st, ok = u.status(ctx, next, wait); !ok {
 			return u.unresolvedOr(ctx, OutUnresolved), false
 		}
 		v = st
@@ -261,10 +265,12 @@ func (u *user) queueUp(ctx context.Context, rejoin bool) (Outcome, bool) {
 	}
 }
 
-// status polls once (2 s timeout, retried immediately on timeout).
-func (u *user) status(ctx context.Context, intended time.Time) (queueView, bool) {
+// status polls once (2 s timeout). A failed attempt is retried with full
+// jitter backoff, never sooner than floor, the server's last retry_after.
+func (u *user) status(ctx context.Context, intended time.Time, floor time.Duration) (queueView, bool) {
 	sent := time.Now()
-	r, ok := u.send(ctx, req{rt: rStatus, method: http.MethodGet, path: u.s.eventPath + "/queue/status", token: u.queue, timeout: statusTimeout, intended: intended})
+	r, ok := u.send(ctx, req{rt: rStatus, method: http.MethodGet, path: u.s.eventPath + "/queue/status", token: u.queue,
+		timeout: statusTimeout, intended: intended, floor: floor})
 	v := queueView{sent: sent}
 	if !ok || r.status != http.StatusOK || json.Unmarshal(r.body, &v) != nil {
 		u.s.anomaly("status", &r)
@@ -548,7 +554,7 @@ func (u *user) pollConfirm(ctx context.Context, orderID string) Outcome {
 	wait := time.Second
 	next := time.Now()
 	for time.Now().Before(deadline) {
-		next = next.Add(wait)
+		next = next.Add(jitter(u.p.rng, wait, 0.2))
 		if !u.sleepUntil(ctx, next) {
 			return OutUnresolved
 		}

@@ -17,7 +17,9 @@ import { ApiError, getEvent, isApiError, type QueueStatus, queueStatus } from "@
 import { etaRange, formatCount, formatCountdown, formatIST, formatMMSS } from "@/lib/format";
 import { useEntry, useLocalNow, useServerNow } from "@/lib/hooks";
 import { useMode } from "@/lib/mode";
+import { backoffMs, stretchMs } from "@/lib/backoff";
 import { giveSlotBack, joinLine } from "@/lib/queue";
+import { retryAfterMs } from "@/lib/retry";
 import { readEntry, writeEntry } from "@/lib/storage";
 import { cn } from "@/lib/utils";
 
@@ -102,12 +104,15 @@ function QueueView({ slug }: { slug: string }) {
     refetchInterval: (q) => {
       const d = q.state.data;
       if (d && (TERMINAL.has(d.state) || d.state === "ADMITTED") && !q.state.error) return false;
+      // A failed poll backs off with full jitter, never sooner than the
+      // server's last retry_after_ms or Retry-After (ADR 0017); a good one
+      // waits retry_after_ms stretched by up to 10%, never shortened.
       const e = q.state.error;
-      if (e instanceof ApiError) {
-        if (e.retryAfterS !== null) return e.retryAfterS * 1000;
-        return Math.min(2000 * 2 ** Math.min(q.state.fetchFailureCount, 3), 15_000);
+      if (e) {
+        const floor = Math.max(retryAfterMs(e), d?.retry_after_ms ?? 0);
+        return backoffMs(q.state.fetchFailureCount - 1, floor);
       }
-      return Math.max(500, d?.retry_after_ms ?? 2000);
+      return stretchMs(Math.max(500, d?.retry_after_ms ?? 2000));
     },
   });
 

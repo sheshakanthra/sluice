@@ -1,16 +1,22 @@
 // Shared queue actions for the queue and book pages.
 
 import { joinQueue, leaveQueue, type JoinResponse } from "./api";
+import { withBackoff } from "./retry";
 import { ensureSession } from "./session";
 import { readEntry, writeEntry } from "./storage";
 
 /** ADR 0008: two rejoins after OFFER_EXPIRED / ADMISSION_EXPIRED. */
 export const MAX_REJOINS = 2;
 
-/** Join (or rejoin) the line and store the new queue token. */
+/**
+ * Join (or rejoin) the line and store the new queue token. A transient
+ * failure is retried with jittered backoff; join is idempotent per user, and
+ * a repeated rejoin is honoured only after OFFER_EXPIRED, so a retry never
+ * spends a second rejoin.
+ */
 export async function joinLine(slug: string, rejoin: boolean): Promise<JoinResponse> {
   const s = await ensureSession();
-  const r = await joinQueue(slug, s.session_token, rejoin);
+  const r = await withBackoff(() => joinQueue(slug, s.session_token, rejoin));
   const prev = readEntry(slug);
   writeEntry(slug, {
     queueToken: r.queue_token ?? undefined,

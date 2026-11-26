@@ -51,6 +51,7 @@ type Options struct {
 	// Reported context (summary.json "env"/"config"); the swarm cannot see
 	// the servers' config, so the compose file passes it in.
 	Runner         string
+	CPUSet         string // RUSH_CPUSET: the CPUs the swarm container is pinned to ("" = not pinned)
 	APIReplicas    int
 	HoldTTL        time.Duration
 	PaymentHoldTTL time.Duration
@@ -88,6 +89,7 @@ func ParseArgs(args []string, getenv Getenv, stderr io.Writer) (*Options, error)
 	fs.DurationVar(&o.MaxDuration, "max-duration", 15*time.Minute, "hard stop after T0")
 	fs.StringVar(&o.RunID, "run-id", "", "run id (default <scenario>-<utc timestamp>)")
 	fs.StringVar(&o.Runner, "runner", envOr(getenv, "RUSH_RUNNER", "local"), "runner label for the report")
+	fs.StringVar(&o.CPUSet, "cpuset", envOr(getenv, "RUSH_CPUSET", ""), "CPUs the swarm is pinned to, for the report (set by compose from RUSH_CPUSET)")
 	fs.IntVar(&o.APIReplicas, "api-replicas", 3, "API replicas behind the front door (reported)")
 	fs.IntVar(&o.UsersPerIP, "users-per-ip", 10, "users sharing one synthetic X-Forwarded-For IP")
 	fs.DurationVar(&o.ProgressEvery, "progress", 5*time.Second, "progress line interval")

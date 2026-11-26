@@ -33,15 +33,31 @@ type Options struct {
 	// leaves q:active. 0 means AdmissionTTL (no idle expiry).
 	AdmissionIdleTTL time.Duration
 	Overadmit        float64 // QUEUE_OVERADMIT, used by the outlook
-	Now              func() time.Time
-	Rand             io.Reader      // lottery scores; nil = crypto/rand
-	Jitter           func() float64 // returns U(0,1); nil = math/rand/v2
-	Log              *slog.Logger
-	Metrics          *Metrics
+	// OfferTTL (OFFER_CLAIM_TTL), MaxAdmitPerTick (QUEUE_MAX_ADMIT_PER_TICK)
+	// and Tick (QUEUE_TICK) bound how fast the cursor can reach a waiting
+	// user, so retry_after never sends anyone past an offer (ADR 0017).
+	OfferTTL        time.Duration
+	MaxAdmitPerTick int64
+	Tick            time.Duration
+	Now             func() time.Time
+	Rand            io.Reader      // lottery scores; nil = crypto/rand
+	Jitter          func() float64 // returns U(0,1); nil = math/rand/v2
+	Log             *slog.Logger
+	Metrics         *Metrics
 	// Restorer initialises the queue counters when a join finds them missing
 	// (a fresh event, or Redis lost them). nil: such joins fail with
 	// ErrNotRestored and the worker restores within one tick.
 	Restorer *Restorer
+}
+
+func (opt *Options) validate() error {
+	if opt.AdmissionTTL <= 0 || opt.Overadmit < 1 || opt.AdmissionIdleTTL < 0 || opt.AdmissionIdleTTL > opt.AdmissionTTL {
+		return errors.New("queue: AdmissionTTL > 0, 0 <= AdmissionIdleTTL <= AdmissionTTL and Overadmit >= 1 are required")
+	}
+	if opt.OfferTTL <= 0 || opt.MaxAdmitPerTick < 1 || opt.Tick <= 0 {
+		return errors.New("queue: OfferTTL > 0, MaxAdmitPerTick >= 1 and Tick > 0 are required (retry_after bounds)")
+	}
+	return nil
 }
 
 // Service answers join, status and leave for one API replica.
@@ -57,8 +73,8 @@ func NewService(sc *redisx.Scripts, keyring *auth.Keyring, cache *Cache, opt Opt
 	if sc == nil || keyring == nil || cache == nil {
 		return nil, errors.New("queue: scripts, keyring and cache are required")
 	}
-	if opt.AdmissionTTL <= 0 || opt.Overadmit < 1 || opt.AdmissionIdleTTL < 0 || opt.AdmissionIdleTTL > opt.AdmissionTTL {
-		return nil, errors.New("queue: AdmissionTTL > 0, 0 <= AdmissionIdleTTL <= AdmissionTTL and Overadmit >= 1 are required")
+	if err := opt.validate(); err != nil {
+		return nil, err
 	}
 	if opt.AdmissionIdleTTL == 0 {
 		opt.AdmissionIdleTTL = opt.AdmissionTTL
@@ -145,7 +161,7 @@ func (s *Service) doJoin(ctx context.Context, ev Event, uid uuid.UUID, rejoin bo
 			return resp, err
 		}
 		resp.State, resp.QueueToken = StatePrequeue, &tok
-		resp.RetryAfterMS = prequeueRetry(ev.SaleOpensAt.Sub(now)).Milliseconds()
+		resp.RetryAfterMS = s.prequeueRetry(ev.SaleOpensAt.Sub(now)).Milliseconds()
 	case "TICKET":
 		t, err := r.Int(0)
 		if err != nil {
@@ -245,14 +261,14 @@ func (s *Service) doStatus(ctx context.Context, ev Event, c auth.Claims) (Status
 		// Pre-queue token: wait for T0 and the freeze, then resolve once.
 		if now.Before(ev.SaleOpensAt) || snap.PreSize == 0 {
 			resp.State = StatePrequeue
-			resp.RetryAfterMS = prequeueRetry(ev.SaleOpensAt.Sub(now)).Milliseconds()
+			resp.RetryAfterMS = s.prequeueRetry(ev.SaleOpensAt.Sub(now)).Milliseconds()
 			return resp, nil
 		}
 		t, state, err := s.resolve(ctx, ev, c.Subject, now)
 		if err != nil || state != "" {
 			resp.State = state
 			if state == StatePrequeue {
-				resp.RetryAfterMS = prequeueRetry(0).Milliseconds()
+				resp.RetryAfterMS = s.prequeueRetry(0).Milliseconds()
 			}
 			return resp, err
 		}
@@ -367,16 +383,64 @@ func (s *Service) waiting(resp *StatusResponse, snap *Snapshot, position int64) 
 	resp.RetryAfterMS = s.waitingRetry(position, snap.Rate).Milliseconds()
 }
 
-// waitingRetry is clamp(eta/4, 1 s, 15 s) x U(0.8, 1.2).
+// Poll pacing bounds (API.md §3.3, ADR 0017).
+const (
+	minWaitingRetry = time.Second
+	maxWaitingRetry = 60 * time.Second
+	// prequeueSpread is the widest window over which pre-queue users are
+	// told to come back after T0 (also capped at OfferTTL/4).
+	prequeueSpread = 5 * time.Second
+	// prequeueNear: once T0 is this close, the next pre-queue poll is sent
+	// to a random moment in [T0, T0 + spread] instead of halving towards T0.
+	prequeueNear = 5 * time.Second
+	// clientJitter is the most a client may stretch retry_after (+10%).
+	clientJitter = 1.1
+)
+
+// waitingRetry is position-aware: clamp(eta/4, 1 s, 60 s) x U(0.8, 1.2),
+// then capped by safeWait(position) so the next poll always lands while an
+// offer made at the earliest possible moment is still claimable.
 func (s *Service) waitingRetry(position int64, rate float64) time.Duration {
-	eta := time.Duration(float64(max(position, 0)) / math.Max(rate, 1) * float64(time.Second))
-	base := min(max(eta/4, time.Second), 15*time.Second)
-	return time.Duration(float64(base) * (0.8 + 0.4*s.opt.Jitter()))
+	return waitingRetry(position, rate, s.opt.Jitter(), s.opt.OfferTTL, s.opt.MaxAdmitPerTick, s.opt.Tick)
 }
 
-// prequeueRetry is clamp(time_to_T0 / 2, 0.5 s, 5 s).
-func prequeueRetry(untilT0 time.Duration) time.Duration {
-	return min(max(untilT0/2, 500*time.Millisecond), 5*time.Second)
+func waitingRetry(position int64, rate, u float64, offerTTL time.Duration, perTick int64, tick time.Duration) time.Duration {
+	eta := time.Duration(float64(max(position, 0)) / math.Max(rate, 1) * float64(time.Second))
+	base := min(max(eta/4, minWaitingRetry), maxWaitingRetry)
+	return min(time.Duration(float64(base)*(0.8+0.4*u)), safeWait(position, offerTTL, perTick, tick))
+}
+
+// safeWait is the longest a user `position` places from the cursor may be
+// told to wait without missing an offer. The cursor moves at most perTick
+// tickets per tick, so their offer cannot appear sooner than
+// ceil(position/perTick) - 1 ticks from now, and it then stays claimable for
+// offerTTL. Half of offerTTL is kept as margin for the poll itself and a late
+// tick, and the result is divided by clientJitter because clients may add up
+// to 10% on top of retry_after (API.md §3.3).
+func safeWait(position int64, offerTTL time.Duration, perTick int64, tick time.Duration) time.Duration {
+	ticks := max(position-1, 0) / max(perTick, 1)
+	return time.Duration(float64(time.Duration(ticks)*tick+offerTTL/2) / clientJitter)
+}
+
+func (s *Service) prequeueRetry(untilT0 time.Duration) time.Duration {
+	return prequeueRetry(untilT0, s.opt.Jitter(), min(prequeueSpread, s.opt.OfferTTL/4))
+}
+
+// prequeueRetry paces PREQUEUE polls without letting them converge on T0:
+//   - more than 5 s before T0: clamp(time_to_T0 / 2, 0.5 s, 5 s) x U(0.8, 1.2);
+//   - within 5 s of T0: time_to_T0 + U(0, spread), one poll landing at a
+//     random moment in [T0, T0 + spread], so the pre-queue resolves over
+//     `spread` instead of in a 0.5 s lockstep at T0;
+//   - after T0 (the pre-queue is not frozen yet): 0.5 s + U(0, 1 s).
+func prequeueRetry(untilT0 time.Duration, u float64, spread time.Duration) time.Duration {
+	switch {
+	case untilT0 <= 0:
+		return 500*time.Millisecond + time.Duration(u*float64(time.Second))
+	case untilT0 <= prequeueNear:
+		return untilT0 + time.Duration(u*float64(spread))
+	}
+	base := min(max(untilT0/2, 500*time.Millisecond), 5*time.Second)
+	return time.Duration(float64(base) * (0.8 + 0.4*u))
 }
 
 // outlook: remaining = avail + 0.25 x held; LIKELY if position <=

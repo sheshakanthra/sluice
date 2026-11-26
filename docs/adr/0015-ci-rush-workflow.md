@@ -37,3 +37,11 @@ The first CI run (`45766424648`, SMOKE 5000) could not publish its results: the 
 - The summary step and `verdict.py` name a missing or unreadable file, still write what they can, and exit 1.
 
 The gate rules and thresholds are unchanged.
+
+## Addendum 2 (2026-11-26): per-container CPU, optional swarm pinning, exit 201
+The H 50k diagnosis (`docs/reports/P8-h50k-diagnosis.md` §3) could not split the runner's 4 cores between the swarm and the stack, because the artifact had no per-container CPU. It also found that the rush step's exit code 201 was go-task's own code, not `sluice`'s. Now:
+- **`docker stats` on every rush.** A background step runs `loadtest/ci/dockerstats.sh` from just before the rush step until a stop step that always runs. It writes one CSV row per container about every 2–3 s; each `docker stats --no-stream` call takes 1–2 s to compute CPU. `loadtest/ci/cpu_summary.py` summarises the samples taken while the swarm container ran into `cpu.md` (mean, p95 and max cores per container, plus the total). That file goes into the job summary, and both files go into the artifact. The sampler's own CPU is not subtracted.
+- **Optional swarm pinning.** The new input `swarm_cpuset` (validated `^[0-9,-]*$`, blank by default) sets `RUSH_CPUSET`, which `deploy/compose.rush.yml` passes to the swarm container as `cpuset`. An empty value means no restriction (checked: `cpuset.cpus.effective` reads `0-15` unpinned and `0` with `RUSH_CPUSET=0` on Docker 28.3.3). Only the swarm is ever pinned. When it is, `summary.json` `env.swarm_cpuset` records it, `report.md` opens with a "Swarm pinned" callout, and `runner.md` prints it. It is off by default: on 4 cores a 1-core swarm could not produce the H demand of the failing run (diagnosis §5, option 4), so it is used only after a measured run shows that it helps.
+- **Exit 201.** `task` exits 201 when a command fails, unless it runs with `--exit-code` (verified with go-task 3.54.0: plain `task` → 201, `task -x` → 1). The Taskfile comment now says so. The gate is unchanged: `verdict.py` requires the rush exit to be 0 for H/SMOKE/B2 and reads the real code from `audit.json`.
+
+The gate rules and thresholds are unchanged.

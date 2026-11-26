@@ -208,7 +208,7 @@ func TestClassifyAndRetry(t *testing.T) {
 		{result{oc: transport}, true},
 	}
 	for _, tc := range tests {
-		wait, again := retryable(&tc.r, 0)
+		wait, again := retryable(&tc.r, 0, 0, 0.5)
 		if again != tc.wantRetry {
 			t.Errorf("%+v: retry %t, want %t", tc.r, again, tc.wantRetry)
 		}

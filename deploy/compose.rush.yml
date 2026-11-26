@@ -27,9 +27,14 @@ services:
       MOCKPAY_DATABASE_URL: postgres://sluice:sluice@postgres:5432/mockpay?sslmode=disable
       REDIS_URL: redis://redis:6379/0
       RUSH_RUNNER: ${RUSH_RUNNER:-local}
+      RUSH_CPUSET: ${RUSH_CPUSET:-}
       # Reported in summary.json; keep in step with deploy/compose.yml.
       RUSH_PG_VERSION: "18.7"
       RUSH_REDIS_VERSION: "8.10.3"
+    # Optional pinning (ADR 0015 addendum): RUSH_CPUSET="0" keeps the swarm on
+    # CPU 0; empty (the default) leaves it unpinned. Only the swarm is
+    # pinned; report.md says so whenever it is set.
+    cpuset: "${RUSH_CPUSET:-}"
     # 50k dedicated connections to one destination need ~64k source ports
     # and as many file descriptors (LOADTEST §1).
     sysctls:

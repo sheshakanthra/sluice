@@ -44,3 +44,20 @@ Pool sizing, from the v2 run's `sluice_pgxpool_*` metrics: all 3 × 24 request c
 - Each API process opens 2 more Postgres connections: 3 × 26 + worker 24 + MockPay 24 = 126 of `max_connections=200`.
 - Direct mode at 20k is still far outside the SLOs on this laptop (the generator is CPU-starved too); the waiting room is the design answer. P7 task 4 (tuning) and the CI headline run own the numbers.
 - Docs updated: `docs/API.md` (§1.3 `OVERLOADED`, `/readyz`, body cap), `docs/STACK.md` §4 (`MAX_IN_FLIGHT`, `SHED_WAIT`, health pool), `docs/ARCHITECTURE.md` §6 (two failure-mode rows), `.env.example`, `deploy/env/rush.env`.
+
+## Addendum (2026-11-26): no fleet-wide ejection, panic fallback
+**Context.** The H 50k CI run `45781258193` (4 vCPU shared by the swarm and the stack) shows `health_fails 3` was not enough. At T0, Caddy's active `/readyz` probe timed out at 2 s on **all three** replicas, and they were all marked down from 08:15:11 to 08:15:17Z. In that window Caddy itself answered 24,632 requests with 503 `no upstreams available` (`P8-h50k-diagnosis.md` §3). The replicas were starved of CPU, not dead: `/readyz` is served from cached state.
+
+**Decision** (`deploy/caddy/Caddyfile`):
+1. **Slower, more tolerant active check:** `health_interval 3s`, `health_timeout 5s`, `health_fails 5`. A replica now has to fail about 15 s of consecutive probes, each allowed 5 s, before it is ejected. `health_passes 1` still brings it back on the first pass. The passive check (`max_fails 100` in `fail_duration 5s`) is unchanged and still catches a killed replica within a second at rush rates (chaos C2).
+2. **Panic fallback when every replica looks unhealthy:**
+   - When the proxy finds no healthy upstream for `lb_try_duration` (1 s), it raises its own 503. A `handle_errors 503` block for `/api/*` then sends the request to `api1..3` anyway, ignoring health, with `lb_try_duration 1s`.
+   - These answers carry `X-Upstream-Fallback: all-unhealthy`.
+   - A replica's own responses, including 503 `OVERLOADED` + `Retry-After`, are responses, not proxy errors, so they pass straight through and never trigger the fallback.
+   - If the replicas really are gone, the fallback's dials fail and the client gets a 502/503 about 1 s later.
+   - Verified locally with `caddy:2.11.9` and two stand-in upstreams whose health URI always failed. With both marked unhealthy, a `POST` with a body was served through the fallback (200, body intact, fallback header set). A replica's own 503 passed through without the header. With both upstreams stopped, the client got 503 after 4.0 s. The commands and output are in `docs/reports/P8-h50k-fix.md` §D.
+
+**Consequences.**
+- A starved fleet keeps serving, and each replica's own shedding (`MAX_IN_FLIGHT`, 503 `OVERLOADED`) stays the overload valve. Caddy no longer turns slow probes into a fleet-wide outage.
+- A truly dead replica that still accepts TCP but never answers `/readyz` stays in rotation up to about 15 s longer than before. Requests to it time out client-side and are retried with backoff (ADR 0017). The passive check still ejects replicas whose dials fail.
+- While all replicas are marked unhealthy, every request first waits `lb_try_duration` (1 s) before the fallback runs. That delay shows up in client latency, measured from the intended start.

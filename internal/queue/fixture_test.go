@@ -88,6 +88,9 @@ func idleTTL(d time.Duration) envOpt    { return func(c *envConfig) { c.idle = d
 // admissionTTL is the env's ADMISSION_TTL (the hard cap).
 const admissionTTL = 10 * time.Minute
 
+// fixtureTick is the controller tick the fixture runs (and tells the service).
+const fixtureTick = 10 * time.Millisecond
+
 func defaultTick() queue.TickConfig {
 	return queue.TickConfig{MaxActive: 1000, Overadmit: 1.5, MinAdmit: 10, MaxPerTick: 200, OfferTTL: time.Minute}
 }
@@ -167,7 +170,7 @@ func newEnv(t *testing.T, opts ...envOpt) *env {
 	mustNil(t, err)
 	e.svc, err = queue.NewService(sc, kr, queue.NewCache(sc, clk.Now, nil), queue.Options{
 		AdmissionTTL: admissionTTL, AdmissionIdleTTL: cfg.idle, Overadmit: cfg.tick.Overadmit, Now: clk.Now, Metrics: qm,
-		Restorer: e.restorer,
+		Restorer: e.restorer, OfferTTL: cfg.tick.OfferTTL, MaxAdmitPerTick: int64(cfg.tick.MaxPerTick), Tick: fixtureTick,
 	})
 	mustNil(t, err)
 	idle := cfg.idle
@@ -179,7 +182,7 @@ func newEnv(t *testing.T, opts ...envOpt) *env {
 	ticker, err := queue.NewTicker(sc, cfg.tick)
 	mustNil(t, err)
 	ticker.WithRestorer(e.restorer, e.wm)
-	copt := queue.ControllerOptions{Tick: 10 * time.Millisecond, Refresh: 50 * time.Millisecond, Now: clk.Now}
+	copt := queue.ControllerOptions{Tick: fixtureTick, Refresh: 50 * time.Millisecond, Now: clk.Now}
 	if cfg.realClock {
 		copt.Now = nil
 	}

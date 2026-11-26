@@ -24,6 +24,7 @@ import {
   queueStatus,
   releaseHold,
 } from "@/lib/api";
+import { jitterMs, stretchMs } from "@/lib/backoff";
 import { formatCount, formatINR, formatMMSS } from "@/lib/format";
 import { useEntry, useServerNow } from "@/lib/hooks";
 import { withIntent } from "@/lib/intent";
@@ -115,7 +116,7 @@ function BookView({ slug }: { slug: string }) {
   const avail = useQuery<AvailState>({
     queryKey: ["avail", slug],
     enabled: live && !!ev && admitted && !ending,
-    refetchInterval: 1000,
+    refetchInterval: () => jitterMs(1000),
     refetchIntervalInBackground: true,
     retry: false,
     queryFn: async () => {
@@ -144,7 +145,7 @@ function BookView({ slug }: { slug: string }) {
     enabled: live && admitted && !!entry.queueToken && !ending,
     retry: false,
     refetchIntervalInBackground: true,
-    refetchInterval: (q) => Math.max(2000, q.state.data?.retry_after_ms ?? 5000),
+    refetchInterval: (q) => stretchMs(Math.max(2000, q.state.data?.retry_after_ms ?? 5000)),
     queryFn: () => queueStatus(slug, readEntry(slug).queueToken!),
   });
   const watchState = watch.data?.state;

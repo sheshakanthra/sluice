@@ -73,6 +73,10 @@ type SummaryEnv struct {
 	Go       string  `json:"go"`
 	Postgres string  `json:"postgres"`
 	Redis    string  `json:"redis"`
+	// SwarmCPUSet is the CPU list the swarm container was pinned to
+	// (RUSH_CPUSET), empty when unpinned. When set, CPUs is the swarm's own
+	// view (the pinned count), not the host's.
+	SwarmCPUSet string `json:"swarm_cpuset,omitempty"`
 }
 
 // SummaryConfig is the scenario configuration.
@@ -180,7 +184,7 @@ func (s *swarm) summarize(started time.Time, ev eventInfo, rows map[int]statsRow
 	sum := &Summary{
 		RunID: o.RunID, GitSHA: buildinfo.Get().Commit, Scenario: o.Scenario.Name, StartedAt: started,
 		Env: SummaryEnv{Runner: o.Runner, CPUs: runtime.NumCPU(), RAMGB: ramGB(), Go: runtime.Version(),
-			Postgres: o.PGVersion, Redis: o.RedisVersion},
+			Postgres: o.PGVersion, Redis: o.RedisVersion, SwarmCPUSet: o.CPUSet},
 		Config: SummaryConfig{Users: o.Users, Seats: ev.Capacity, HoldTTLS: int(o.HoldTTL.Seconds()),
 			PaymentHoldTTLS: int(o.PaymentHoldTTL.Seconds()), APIReplicas: o.APIReplicas, Event: ev.Slug,
 			Conn: o.Conn, Arrival: arrivalString(o.Arrival), OpensInS: int(o.OpensIn.Seconds()), Seed: o.Seed,
@@ -416,7 +420,11 @@ func RenderReport(s *Summary) string {
 	p("# Rush %s (scenario %s)\n\n", s.RunID, s.Scenario)
 	p("Commit `%s`, started %s. Runner `%s`: %d CPUs, %.1f GB RAM, %s, Postgres %s, Redis %s.\n\n",
 		s.GitSHA, s.StartedAt.Format(time.RFC3339), s.Env.Runner, s.Env.CPUs, s.Env.RAMGB, s.Env.Go, s.Env.Postgres, s.Env.Redis)
-	p("The swarm shares CPUs with the system under test, so these numbers are conservative.\n\n")
+	if s.Env.SwarmCPUSet != "" {
+		p("> **Swarm pinned** to CPUs `%s` (RUSH_CPUSET); the stack is not pinned and may use every CPU, including these. CPUs above is the swarm's own view.\n\n", s.Env.SwarmCPUSet)
+	} else {
+		p("The swarm shares CPUs with the system under test, so these numbers are conservative.\n\n")
+	}
 	if s.Generator.GeneratorBound {
 		p("> **GENERATOR-BOUND:** schedule lag p99 %.1f ms > %d ms. Latencies include the swarm's own delay.\n\n", s.Generator.LagP99MS, GeneratorBoundLagMS)
 	}

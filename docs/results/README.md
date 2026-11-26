@@ -11,6 +11,7 @@ Every rush (`task rush*`, `task chaos` or the `rush` GitHub Actions workflow) wr
 | `audit.json` | `sluice audit` | The auditor's full verdict: each check with its count, the SQL evidence (sample rows) and the settle loop. |
 | `timeseries.csv` | `sluice rush` | One row per second relative to T0 (negative = before the sale opens). Columns are listed below. |
 | `runner.md`, `stack.log.gz`, `ps.txt`, `verdict.md` | CI only (`.github/workflows/rush.yml`) | Runner CPU/RAM/versions, the whole stack's logs, container states, and the CI gate's verdict (`loadtest/ci/verdict.py`). |
+| `docker-stats.csv.gz`, `cpu.md` | CI only | Per-container CPU% and memory sampled with `docker stats` about every 2–3 s (`loadtest/ci/dockerstats.sh`), and the per-container mean/p95/max cores while the swarm ran (`loadtest/ci/cpu_summary.py`). CPU% is per core: 400% = all 4 cores. |
 
 ## `summary.json`, field by field
 

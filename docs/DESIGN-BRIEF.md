@@ -68,7 +68,7 @@ Seat states must **not rely on colour alone**:
 4. **Money clarity.** Every failure path states "You were not charged" when `charged:false`, and "charged ₹X" when true. Never leave the money state ambiguous.
 5. **No dark patterns.** No fake scarcity, no fake timers. Every number on screen is real (live) or labelled as a replay.
 6. **IST everywhere**, with the date (for example "10:00:00 IST, Sat 22 Nov"). Use ₹ with Indian digit grouping (₹1,25,000).
-7. **Polling** follows the server's `retry_after_ms`. Keep polling in background tabs (people switch apps), but use the server-advised interval only, never faster.
+7. **Polling** follows the server's `retry_after_ms`, stretched by up to 10% and never shortened. Keep polling in background tabs (people switch apps), but use the server-advised interval only, never faster. A failed call backs off with full jitter, never sooner than the server's last interval or `Retry-After` (API.md §3.3, ADR 0017).
 8. **Motion is meaningful only:** position ticks, a seat flips state, the timer is urgent. Respect `prefers-reduced-motion`.
 9. **Give the slot back.** When an admitted user ends without seats, the UI calls `DELETE /events/{id}/queue` with the admission token, the same exit rule the swarm follows (LOADTEST §3.2). That covers no seats left after the retries, "all seats are on hold" (`INSUFFICIENT_SEATS` with 0 available), and "Leave"/"Cancel" from the seat map or the hold (ABANDONED). The copy says so ("We've given your place to the next person"). The server also frees an idle admission after `ADMISSION_IDLE_TTL` (ADR 0010 addendum), but the explicit call frees it at once and doesn't rely on that.
 

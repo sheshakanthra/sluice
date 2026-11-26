@@ -6,23 +6,39 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math/rand/v2"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strconv"
+	"sync"
 	"time"
 )
 
-// Per-call client timeouts (LOADTEST §3.3).
+// Per-call client timeouts (LOADTEST §3.3). Each one runs from the moment
+// the request has its connection and is about to be written (see do).
 const (
 	statusTimeout = 2 * time.Second
 	callTimeout   = 5 * time.Second
+	dialTimeout   = 5 * time.Second
 	maxBody       = 1 << 20
 )
+
+// Client backoff for a failed attempt (LOADTEST §3.3, ADR 0017): full
+// jitter, U(0, min(backoffCap, backoffBase x 2^attempt)), never below the
+// server's own pacing (its last retry_after or Retry-After).
+const (
+	backoffBase = 500 * time.Millisecond
+	backoffCap  = 30 * time.Second
+)
+
+// errCallTimeout cancels a request whose per-call timeout ran out.
+var errCallTimeout = errors.New("rush: call timeout")
 
 // newTransport returns the per-user transport (dedicated: one keep-alive
 // connection per user, like a real browser tab) or a pooled one.
 func newTransport(conn string) *http.Transport {
-	d := &net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}
+	d := &net.Dialer{Timeout: dialTimeout, KeepAlive: 30 * time.Second}
 	t := &http.Transport{
 		DialContext:         d.DialContext,
 		ForceAttemptHTTP2:   false,
@@ -89,7 +105,34 @@ type req struct {
 	ik       string
 	body     any
 	timeout  time.Duration
-	intended time.Time // when the request was meant to go out
+	intended time.Time     // when the request was meant to go out
+	floor    time.Duration // server-given pacing: no retry sooner than this
+}
+
+// sendDeadline arms q's timeout when the request gets its connection, so the
+// budget measures the server (and the network), not the swarm's own dial or
+// scheduling delay. A hard stop at dial + timeout bounds a connection that
+// never comes. Latency is still recorded from q.intended (LOADTEST §3.4).
+type sendDeadline struct {
+	mu     sync.Mutex
+	timer  *time.Timer
+	cancel context.CancelCauseFunc
+}
+
+func (d *sendDeadline) arm(timeout time.Duration) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.timer == nil {
+		d.timer = time.AfterFunc(timeout, func() { d.cancel(errCallTimeout) })
+	}
+}
+
+func (d *sendDeadline) stop() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.timer != nil {
+		d.timer.Stop()
+	}
 }
 
 // do sends one request and records it against its intended start. A
@@ -103,9 +146,16 @@ func (c *client) do(ctx context.Context, q req) result {
 		}
 		rd = bytes.NewReader(b)
 	}
-	cctx, cancel := context.WithTimeout(ctx, q.timeout)
-	defer cancel()
-	hr, err := http.NewRequestWithContext(cctx, q.method, c.base+q.path, rd)
+	cctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	dl := &sendDeadline{cancel: cancel}
+	defer dl.stop()
+	hard := time.AfterFunc(dialTimeout+q.timeout, func() { cancel(errCallTimeout) })
+	defer hard.Stop()
+	tctx := httptrace.WithClientTrace(cctx, &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) { dl.arm(q.timeout) },
+	})
+	hr, err := http.NewRequestWithContext(tctx, q.method, c.base+q.path, rd)
 	if err != nil {
 		return result{err: err, oc: transport}
 	}
@@ -136,7 +186,7 @@ func (c *client) do(ctx context.Context, q req) result {
 	case ctx.Err() != nil:
 		res.err, res.oc = ctx.Err(), transport
 		return res // run over: not a measurement
-	case err != nil && (errors.Is(err, context.DeadlineExceeded) || isTimeout(err)):
+	case err != nil && (errors.Is(context.Cause(cctx), errCallTimeout) || errors.Is(err, context.DeadlineExceeded) || isTimeout(err)):
 		res.status, res.err, res.oc = 0, err, timedOut
 	case err != nil:
 		res.status, res.err, res.oc = 0, err, transport
@@ -152,19 +202,33 @@ func isTimeout(err error) bool {
 	return errors.As(err, &ne) && ne.Timeout()
 }
 
+// backoff is full-jitter exponential backoff, U(0, min(backoffCap,
+// backoffBase x 2^attempt)), floored at floor. u is U(0,1).
+func backoff(attempt int, floor time.Duration, u float64) time.Duration {
+	ceil := backoffCap
+	if attempt < 16 {
+		ceil = min(backoffCap, backoffBase<<attempt)
+	}
+	return max(floor, time.Duration(u*float64(ceil)))
+}
+
 // retryable reports whether the same request (same IK) should be sent again,
-// and after how long.
-func retryable(r *result, attempt int) (time.Duration, bool) {
-	backoff := min(time.Duration(250*(1<<min(attempt, 3)))*time.Millisecond, 2*time.Second)
+// and after how long. Failures (timeout, transport, 5xx, 429) back off with
+// full jitter, never sooner than the server's pacing: q's floor (the last
+// retry_after) or the response's Retry-After. REQUEST_IN_PROGRESS is not a
+// failure (the first attempt is still running) and keeps its short wait.
+func retryable(r *result, attempt int, floor time.Duration, u float64) (time.Duration, bool) {
 	switch {
 	case r.oc == timedOut || r.oc == transport:
-		return backoff, true
-	case r.status >= 500:
-		return max(r.retryAfter, backoff), true
-	case r.status == http.StatusTooManyRequests:
-		return max(r.retryAfter, 500*time.Millisecond), true
+		return backoff(attempt, floor, u), true
+	case r.status >= 500, r.status == http.StatusTooManyRequests:
+		return backoff(attempt, max(floor, r.retryAfter), u), true
 	case r.status == http.StatusConflict && r.code() == "REQUEST_IN_PROGRESS":
 		return max(r.retryAfter, 500*time.Millisecond), true
 	}
 	return 0, false
 }
+
+// jitterU is the U(0,1) draw for backoff. math/rand/v2's top-level source is
+// safe for concurrent use, so a user and its double-submit twin can share it.
+func jitterU() float64 { return rand.Float64() } //nolint:gosec // G404: retry jitter, not a secret

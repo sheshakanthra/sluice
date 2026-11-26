@@ -42,13 +42,16 @@
 			# (ADR 0013), so a busy replica stays in rotation and sheds load
 			# itself with 503 OVERLOADED instead of being ejected.
 			health_uri /readyz
-			health_interval 2s
-			health_timeout 2s
+			health_interval 3s
 			health_status 2xx
-			# One slow probe on a CPU-starved box must not eject a replica:
-			# 3 consecutive failures (about 6 s) mark it down, 1 pass brings
-			# it back. A killed replica is caught sooner by the passive check.
-			health_fails 3
+			# Slow probes on a CPU-starved box must not eject a replica. The
+			# H 50k CI run (P8-h50k-diagnosis) saw every replica's probe miss a
+			# 2 s timeout at T0 and all three ejected for ~6 s (24,632 "no
+			# upstreams available"). Now: 5 s per probe, and 5 consecutive
+			# failures (about 15 s) mark a replica down; 1 pass brings it back.
+			# A killed replica is caught sooner by the passive check below.
+			health_timeout 5s
+			health_fails 5
 			health_passes 1
 			# Passive: 100 failed dials within 5 s mark a replica down for
 			# the rest of that window. A killed replica (C2) reaches that in
@@ -60,6 +63,31 @@
 			transport http {
 				keepalive 2m
 				keepalive_idle_conns_per_host 1024
+			}
+		}
+	}
+
+	# Last resort when every replica looks unhealthy (ADR 0013 addendum):
+	# the proxy above answers its own 503 "no upstreams available" only
+	# after lb_try_duration found no healthy replica. Rather than turn a
+	# starved-but-alive fleet into 503s, send the request to the replicas
+	# anyway, ignoring health (a "panic mode"). A replica's own answers,
+	# including 503 OVERLOADED, are responses, not errors, so they never
+	# land here. If the replicas are really gone, the dials fail and the
+	# client gets 502/503 after about 1 s more. X-Upstream-Fallback marks
+	# these answers so a run can count them.
+	handle_errors 503 {
+		@api path /api/*
+		handle @api {
+			header X-Upstream-Fallback all-unhealthy
+			reverse_proxy api1:8080 api2:8080 api3:8080 {
+				lb_policy least_conn
+				lb_try_duration 1s
+				lb_try_interval 100ms
+				transport http {
+					keepalive 2m
+					keepalive_idle_conns_per_host 1024
+				}
 			}
 		}
 	}

@@ -140,6 +140,11 @@ tasks:
     cmds:
       - pnpm --dir web build
 
+  web:test:
+    desc: Web unit tests (node --test; lib/*.test.mjs)
+    cmds:
+      - pnpm --dir web test
+
   web:lint:
     desc: ESLint + Prettier check + TypeScript typecheck
     cmds:
@@ -223,9 +228,14 @@ tasks:
 
   # ---------- the rush (LOADTEST.md) ----------
   # Every rush task: fresh stack (down -v) -> build -> migrate -> seed -> swarm
-  # -> audit -> summary table. The task's exit code is the swarm/auditor's:
-  # 0 pass, 1 invariant failed or unresolved users, 2 settle timed out.
-  # B0 is EXPECTED to exit 1 (it proves the auditor catches oversells).
+  # -> audit -> summary table. `sluice rush --audit` exits 0 pass, 1 invariant
+  # failed or unresolved users, 2 settle timed out, 3 error. Plain `task`
+  # does NOT pass that code through: any failing command makes `task` exit
+  # 201 ("task run error"). Run `task --exit-code rush...` (`-x`) to get the
+  # command's own code. CI (loadtest/ci/verdict.py) gates on summary.json and
+  # only checks that this exit code is 0, so a 201 there means "non-zero";
+  # the real code is audit.json's exit_code.
+  # B0 is EXPECTED to fail the audit (it proves the auditor catches oversells).
   # The stack is left running for inspection; `task stack:down -- -v` stops it.
   rush:scenario:
     internal: true
@@ -277,7 +287,7 @@ tasks:
         vars: { SCENARIO: B2, OVERLAY: b2, USERS: '{{.USERS | default "10000"}}', CONN: '{{.CONN | default "dedicated"}}' }
 
   audit:
-    desc: "Run the auditor against the running stack: EVENT=<slug> [RESULTS=<run_id>] [MODE=naive] (exit 0 pass, 1 fail, 2 settle timeout, 3 error)"
+    desc: "Run the auditor against the running stack: EVENT=<slug> [RESULTS=<run_id>] [MODE=naive] (auditor exits 0 pass, 1 fail, 2 settle timeout, 3 error; task -x passes it through, plain task exits 201)"
     requires:
       vars: [EVENT]
     env:

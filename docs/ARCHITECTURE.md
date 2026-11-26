@@ -60,7 +60,7 @@ sequenceDiagram
   U->>API: GET /queue/status (after T0)
   API->>R: queue_resolve.lua: ZRANK, once per user
   API-->>U: WAITING ticket #n + refreshed queue_token(tkt=n)
-  loop every retry_after (1-15 s, +/-20% jitter)
+  loop every retry_after (1-60 s by position, jittered; ADR 0017)
     U->>API: GET /queue/status
     Note right of API: in-memory snapshot, no Redis call
     API-->>U: position, ahead, eta, outlook, seat counts
@@ -198,8 +198,9 @@ Every second the worker also writes `queue_snapshots` (counters plus the live of
 - `position = ticket − cursor`
 - `ahead = position − 1`
 - `eta_s = position / max(admit_rate_ema, 1)`
-- `retry_after = clamp(eta_s / 4, 1 s, 15 s) × U(0.8, 1.2)`
-- PREQUEUE: `retry_after = clamp(time_to_T0 / 2, 0.5 s, 5 s)`. PAUSED: 5–10 s.
+- `retry_after = min(clamp(eta_s / 4, 1 s, 60 s) × U(0.8, 1.2), safeWait(position))`, where `safeWait = ((ceil(position / QUEUE_MAX_ADMIT_PER_TICK) − 1) × QUEUE_TICK + OFFER_CLAIM_TTL / 2) / 1.1`: the fastest the cursor could reach the user, plus half the offer TTL, with room for +10% client jitter. A client that follows it never misses an offer (ADR 0017).
+- PREQUEUE: `clamp(time_to_T0 / 2, 0.5 s, 5 s) × U(0.8, 1.2)` while T0 is more than 5 s away, then `time_to_T0 + U(0, min(5 s, OFFER_CLAIM_TTL / 4))`, so the pre-queue resolves spread over [T0, T0 + 5 s], not in one lockstep. After T0 and before the freeze: 0.5–1.5 s. PAUSED: 5–10 s.
+- Clients wait `retry_after × U(1, 1.1)`. A failed poll backs off with full jitter, capped at 30 s, never sooner than the last `retry_after` (API.md §3.3).
 - **Outlook:** `remaining = avail + 0.25 × held`. LIKELY if `position ≤ remaining × OVERADMIT`, POSSIBLE if `≤ 3 ×` that, otherwise UNLIKELY.
 
 ## 6. Failure modes
