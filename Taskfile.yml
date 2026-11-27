@@ -236,6 +236,7 @@ tasks:
   # only checks that this exit code is 0, so a 201 there means "non-zero";
   # the real code is audit.json's exit_code.
   # B0 is EXPECTED to fail the audit (it proves the auditor catches oversells).
+  # Every rush task also writes the swarm's cpu.pprof and heap.pprof (--pprof).
   # The stack is left running for inspection; `task stack:down -- -v` stops it.
   rush:scenario:
     internal: true
@@ -258,7 +259,17 @@ tasks:
       - "{{.STACK}} build migrate"
       - "{{.STACK}} up -d --wait"
       - "{{.STACK}} run --rm -T seed seed --event {{.EVENT}} --capacity {{.SEATS}} --opens-in 30m"
-      - "{{.STACK}} run --rm -T rush --target http://caddy:8000 --event {{.EVENT}} --scenario {{.SCENARIO}} --users {{.USERS}} --conn {{.CONN}} --opens-in {{.OPENS_IN}} --run-id {{.RUN_ID}} --audit {{.CLI_ARGS}}"
+      - "{{.STACK}} run --rm -T rush --target http://caddy:8000 --event {{.EVENT}} --scenario {{.SCENARIO}} --users {{.USERS}} --conn {{.CONN}} --opens-in {{.OPENS_IN}} --run-id {{.RUN_ID}} --audit --pprof {{.CLI_ARGS}}"
+
+  rush:profile:
+    desc: "Profile the swarm: H mix at USERS (15000) with dedicated connections on a fresh stack, then the audit and the top of the swarm's cpu.pprof (every rush task writes cpu.pprof + heap.pprof)"
+    vars:
+      USERS: '{{.USERS | default "15000"}}'
+      RUN_ID: '{{.RUN_ID | default (printf "profile-%s" (now | date "20060102-150405"))}}'
+    cmds:
+      - task: rush:scenario
+        vars: { SCENARIO: H, USERS: '{{.USERS}}', CONN: dedicated, RUN_ID: '{{.RUN_ID}}' }
+      - go tool pprof -top -nodecount=30 loadtest/results/{{.RUN_ID}}/cpu.pprof
 
   rush:smoke:
     desc: "SMOKE: 5k users (USERS=...), waiting room on, correct system; then the audit. Must pass with every invariant 0"

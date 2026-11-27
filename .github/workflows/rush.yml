@@ -176,6 +176,11 @@ jobs:
             logs --no-color --timestamps > "$dir/stack.log" 2>&1 || true
           gzip -f "$dir/stack.log"
           docker compose -f deploy/compose.yml -f deploy/compose.app.yml -f deploy/compose.rush.yml ps -a > "$dir/ps.txt" 2>&1 || true
+          # The swarm's own profiles (--pprof, ADR 0019) ride in the artifact;
+          # their top goes next to them and into the job summary.
+          if [ -f "$dir/cpu.pprof" ]; then
+            go tool pprof -top -nodecount=25 "$dir/cpu.pprof" > "$dir/pprof-top.txt" 2>&1 || true
+          fi
 
       # LOADTEST §7 step 6: public proof on the run page.
       - name: Job summary and verdict
@@ -205,6 +210,15 @@ jobs:
             section runner.md
             section "$dir/report.md"
             section "$dir/cpu.md"
+            if [ -r "$dir/pprof-top.txt" ]; then
+              echo "<details><summary>Swarm CPU profile (top 25; cpu.pprof and heap.pprof are in the artifact)</summary>"
+              echo
+              echo '```'
+              cat "$dir/pprof-top.txt"
+              echo '```'
+              echo "</details>"
+              echo
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
           python3 loadtest/ci/verdict.py "$dir" "$SCENARIO" "$RUSH_EXIT" > verdict.md
           code=$?

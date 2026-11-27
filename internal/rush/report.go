@@ -130,6 +130,17 @@ type SummaryGenerator struct {
 	GeneratorBound bool    `json:"generator_bound"`
 	StatsSamples   int     `json:"stats_samples"`
 	StatsFailed    int     `json:"stats_failed"`
+	// CPUSamplesInvalid are 1 s CPU samples left out of max/mean because the
+	// sampler could not read CPU and wall time together (cpuMeter).
+	CPUSamplesInvalid int `json:"cpu_samples_invalid"`
+	// Whole-run cost of the swarm process, users start to last user done.
+	CPUSeconds         float64 `json:"cpu_seconds"`
+	CPUCoresRunMean    float64 `json:"cpu_cores_run_mean"`
+	CPUMSPer1kRequests float64 `json:"cpu_ms_per_1k_requests"`
+	GCCycles           uint64  `json:"gc_cycles"`
+	GCCPUSeconds       float64 `json:"gc_cpu_seconds"`
+	HeapLivePeakMB     float64 `json:"heap_live_peak_mb"`
+	PProf              bool    `json:"pprof"`
 }
 
 // SummaryRecords are the swarm's own records for the auditor.
@@ -227,12 +238,18 @@ func (s *swarm) summarize(started time.Time, ev eventInfo, rows map[int]statsRow
 	var seatsSold int64
 	gen := SummaryGenerator{LagP99MS: lag.P99, LagMaxMS: lag.Max, GeneratorBound: lag.P99 > GeneratorBoundLagMS}
 	var cpuSum float64
+	cpuN := 0
 	for _, i := range sortedKeys(rows) {
 		row := rows[i]
 		gen.StatsSamples++
-		gen.CPUCoresMax = max(gen.CPUCoresMax, row.CPUCores)
 		gen.GoroutinesMax = max(gen.GoroutinesMax, row.Goroutines)
-		cpuSum += row.CPUCores
+		if row.CPUValid {
+			gen.CPUCoresMax = max(gen.CPUCoresMax, row.CPUCores)
+			cpuSum += row.CPUCores
+			cpuN++
+		} else {
+			gen.CPUSamplesInvalid++
+		}
 		if !row.ok {
 			gen.StatsFailed++
 			continue
@@ -243,10 +260,21 @@ func (s *swarm) summarize(started time.Time, ev eventInfo, rows map[int]statsRow
 			sum.Timing.SoldOutS = &v
 		}
 	}
-	if gen.StatsSamples > 0 {
-		gen.CPUCoresMean = math.Round(cpuSum/float64(gen.StatsSamples)*100) / 100
+	if cpuN > 0 {
+		gen.CPUCoresMean = math.Round(cpuSum/float64(cpuN)*100) / 100
 	}
 	gen.CPUCoresMax = math.Round(gen.CPUCoresMax*100) / 100
+	round2 := func(v float64) float64 { return math.Round(v*100) / 100 }
+	gen.CPUSeconds = round2(s.cost.CPU.Seconds())
+	if w := s.cost.Wall.Seconds(); w > 0 {
+		gen.CPUCoresRunMean = round2(s.cost.CPU.Seconds() / w)
+	}
+	if n := r.requests.Load(); n > 0 {
+		gen.CPUMSPer1kRequests = round2(float64(s.cost.CPU.Milliseconds()) / float64(n) * 1000)
+	}
+	gen.GCCycles, gen.GCCPUSeconds = s.cost.GCCycles, round2(s.cost.GCCPUSeconds)
+	gen.HeapLivePeakMB = round2(float64(s.heapPeak.Load()) / (1 << 20))
+	gen.PProf = s.o.PProf
 	sum.Generator = gen
 	sum.Outcomes["seats_sold"] = seatsSold
 	sum.Records = s.records(rows)
@@ -446,9 +474,19 @@ func RenderReport(s *Summary) string {
 	p("\n## Errors and business answers\n| error rate | 5xx | timeouts | transport | 409 | 422 | 429 |\n|---|---|---|---|---|---|---|\n")
 	p("| %.4f%% | %d | %d | %d | %d | %d | %d |\n\n", s.Errors.Rate*100, s.Errors.S5xx, s.Errors.Timeouts, s.Errors.Transport,
 		s.Business["409"], s.Business["422"], s.Business["429"])
-	p("## Generator self-check\n| lag p99 | lag max | CPU cores max / mean | goroutines max | /stats samples (failed) |\n|---|---|---|---|---|\n")
+	p("## Generator self-check\n| lag p99 | lag max | CPU cores max / mean (1 s samples) | goroutines max | /stats samples (failed) |\n|---|---|---|---|---|\n")
 	p("| %.1f ms | %.1f ms | %.2f / %.2f | %d | %d (%d) |\n\n", s.Generator.LagP99MS, s.Generator.LagMaxMS, s.Generator.CPUCoresMax,
 		s.Generator.CPUCoresMean, s.Generator.GoroutinesMax, s.Generator.StatsSamples, s.Generator.StatsFailed)
+	p("| CPU s (run) | cores (run mean) | CPU ms / 1k requests | GC cycles | GC CPU s | live heap peak |\n|---|---|---|---|---|---|\n")
+	p("| %.2f | %.2f | %.2f | %d | %.2f | %.1f MB |\n\n", s.Generator.CPUSeconds, s.Generator.CPUCoresRunMean, s.Generator.CPUMSPer1kRequests,
+		s.Generator.GCCycles, s.Generator.GCCPUSeconds, s.Generator.HeapLivePeakMB)
+	if s.Generator.CPUSamplesInvalid > 0 {
+		p("%d CPU samples were left out of max/mean: the sampler could not read CPU and wall time within %s of each other.\n\n",
+			s.Generator.CPUSamplesInvalid, maxBracket)
+	}
+	if s.Generator.PProf {
+		p("Swarm profiles: `cpu.pprof` (whole run), `heap.pprof` (live-heap peak). Read them with `go tool pprof -top cpu.pprof`.\n\n")
+	}
 	if len(s.Anomalies) > 0 {
 		p("## Unexpected answers\n| step:answer | count |\n|---|---|\n")
 		keys := make([]string, 0, len(s.Anomalies))

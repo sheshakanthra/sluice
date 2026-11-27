@@ -24,6 +24,8 @@ type swarm struct {
 	base      string // target + /api/v1
 	eventPath string // /events/<slug or id>
 	pooled    *http.Transport
+	prof      *profiler // nil unless --pprof
+	heapPeak  atomic.Uint64
 
 	inSystem, peak, waiting, shopping, started atomic.Int64
 	outcomes                                   [numOutcomes]atomic.Int64
@@ -36,12 +38,32 @@ type swarm struct {
 	// (the auditor's admitted_after_soldout check, LOADTEST §6).
 	admitMu   sync.Mutex
 	admitSent []time.Time
+
+	cost runCost // filled when every user is done
+}
+
+// runCost is what the run cost the swarm process, from just before the
+// users start until the last one finishes (summary.json "generator").
+type runCost struct {
+	CPU          time.Duration // process user+system CPU (getrusage on Linux)
+	Wall         time.Duration
+	GCCycles     uint64
+	GCCPUSeconds float64 // the Go runtime's estimate of GC CPU time
 }
 
 func (s *swarm) recordAdmit(sent time.Time) {
 	s.admitMu.Lock()
 	s.admitSent = append(s.admitSent, sent)
 	s.admitMu.Unlock()
+}
+
+func (s *swarm) observeHeap(live uint64) {
+	for {
+		p := s.heapPeak.Load()
+		if live <= p || s.heapPeak.CompareAndSwap(p, live) {
+			return
+		}
+	}
 }
 
 func (s *swarm) enter() {
@@ -87,19 +109,29 @@ func (s *swarm) syntheticIP(i int) string {
 	return fmt.Sprintf("198.%d.%d.%d", 18+(g>>16)&1, (g>>8)&0xff, g&0xff)
 }
 
-func (s *swarm) clientFor(xff string) (*client, *http.Transport) {
-	t := s.pooled
+// clientFor gives a user its client: in dedicated mode its own keep-alive
+// connection (closed when ctx, the run, ends), else the shared transport.
+func (s *swarm) clientFor(ctx context.Context, xff string) *client {
+	c := &client{base: s.base, xff: xff, rec: s.rec}
 	if s.o.Conn == ConnDedicated {
-		t = newTransport(ConnDedicated)
+		uc, err := newUserConn(ctx, s.base)
+		if err == nil {
+			c.uc = uc
+			return c
+		}
+		// Unreachable after Run's own parse of the target; fall back to net/http.
+		c.hc = &http.Client{Transport: newTransport(ConnDedicated)}
+		return c
 	}
-	return &client{hc: &http.Client{Transport: t}, base: s.base, xff: xff, rec: s.rec}, t
+	c.hc = &http.Client{Transport: s.pooled}
+	return c
 }
 
 // twinClient is the "second tab" for the double-submit: a separate
-// connection, so the two /pay calls really are concurrent.
-func (s *swarm) twinClient(xff string) *client {
-	c, _ := s.clientFor(xff)
-	return c
+// connection, so the two /pay calls really are concurrent. Like a second
+// browser tab it stays open (idle) until the run ends.
+func (s *swarm) twinClient(ctx context.Context, xff string) *client {
+	return s.clientFor(ctx, xff)
 }
 
 // eventInfo is what the swarm needs from GET /events/{id}.
@@ -118,6 +150,7 @@ type statsRow struct {
 	At                                        time.Time // when the /stats answer arrived
 	Goroutines                                int
 	CPUCores                                  float64
+	CPUValid                                  bool // CPUCores is a tight, primed sample (cpuMeter)
 	ok                                        bool
 }
 
@@ -170,6 +203,13 @@ func Run(ctx context.Context, o *Options, stdout io.Writer) (*Summary, error) {
 	_, _ = fmt.Fprintf(stdout, "rush %s: scenario %s, %d users, conn=%s, event %s (%d seats), T0 %s (in %s)\n",
 		o.RunID, o.Scenario.Name, o.Users, o.Conn, ev.Slug, ev.Capacity, t0.Format(time.RFC3339), time.Until(t0).Round(time.Second))
 
+	if o.PProf {
+		if s.prof, err = startProfiler(o.Out); err != nil {
+			return nil, err
+		}
+	}
+	cpuStart, rtStart, wallStart := processCPU(), readRuntimeStats(), time.Now()
+
 	runCtx, cancel := context.WithDeadline(ctx, t0.Add(o.MaxDuration))
 	defer cancel()
 
@@ -186,20 +226,24 @@ func Run(ctx context.Context, o *Options, stdout io.Writer) (*Summary, error) {
 	var wg sync.WaitGroup
 	for i := range plans {
 		wg.Go(func() {
-			c, t := s.clientFor(s.syntheticIP(i))
+			c := s.clientFor(runCtx, s.syntheticIP(i))
 			u := &user{s: s, p: plans[i], c: c}
 			s.started.Add(1)
 			out := u.run(runCtx)
 			s.finish(u, out)
-			if t != s.pooled {
-				t.CloseIdleConnections()
-			}
+			c.close()
 		})
 	}
 	wg.Wait()
 	stopSampler()
 	bg.Wait()
 	s.pooled.CloseIdleConnections()
+	rtEnd := readRuntimeStats()
+	s.cost = runCost{CPU: processCPU() - cpuStart, Wall: time.Since(wallStart),
+		GCCycles: rtEnd.GCCycles - rtStart.GCCycles, GCCPUSeconds: rtEnd.GCCPUSeconds - rtStart.GCCPUSeconds}
+	if err := s.prof.stop(); err != nil {
+		_, _ = fmt.Fprintf(stdout, "rush %s: pprof: %v\n", o.RunID, err)
+	}
 
 	rowsMu.Lock()
 	defer rowsMu.Unlock()
@@ -258,27 +302,6 @@ func openSale(ctx context.Context, c *http.Client, base, event, admin string, op
 	return out.SaleOpensAt, nil
 }
 
-// cpuMeter turns cumulative process CPU time into cores used since the last read.
-type cpuMeter struct {
-	last     time.Duration
-	lastWall time.Time
-	primed   bool
-}
-
-func newCPUMeter() *cpuMeter { return &cpuMeter{} }
-
-func (m *cpuMeter) read() float64 {
-	used, now := processCPU(), time.Now()
-	cores := 0.0
-	if m.primed {
-		if wall := now.Sub(m.lastWall).Seconds(); wall > 0 {
-			cores = (used - m.last).Seconds() / wall
-		}
-	}
-	m.last, m.lastWall, m.primed = used, now, true
-	return cores
-}
-
 // sample polls GET /stats every second (not counted as swarm load) and the
 // generator self-check (goroutines, CPU).
 func (s *swarm) sample(ctx context.Context, c *http.Client, mu *sync.Mutex, rows map[int]statsRow) {
@@ -290,9 +313,13 @@ func (s *swarm) sample(ctx context.Context, c *http.Client, mu *sync.Mutex, rows
 		case <-ctx.Done():
 			return
 		case now := <-tick.C:
+			cores, valid := cpu.read()
 			row := statsRow{
-				InSystem: s.inSystem.Load(), Goroutines: runtime.NumGoroutine(), CPUCores: cpu.read(),
+				InSystem: s.inSystem.Load(), Goroutines: runtime.NumGoroutine(), CPUCores: cores, CPUValid: valid,
 			}
+			rs := readRuntimeStats()
+			s.observeHeap(rs.HeapLive)
+			s.prof.observeHeap(rs.HeapLive)
 			if b, ok := fetchStats(ctx, c, s.base+"/stats/"+url.PathEscape(s.o.Event)); ok {
 				row.ok, row.At = true, time.Now()
 				row.Waiting, row.Cursor, row.Offers, row.Active = b.Queue.Waiting, b.Queue.Cursor, b.Queue.Offers, b.Queue.Active

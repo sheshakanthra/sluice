@@ -520,7 +520,7 @@ func (u *user) pay(ctx context.Context, orderID, pm string, first bool) (orderVi
 		body: map[string]string{"payment_method": pm}, timeout: callTimeout, intended: time.Now()}
 	var wg sync.WaitGroup
 	if first && u.p.double {
-		twin := u.s.twinClient(u.c.xff)
+		twin := u.s.twinClient(ctx, u.c.xff)
 		wg.Go(func() { _, _ = sendWith(ctx, twin, q) })
 	}
 	r, ok := u.send(ctx, q)

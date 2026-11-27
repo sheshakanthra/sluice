@@ -78,7 +78,9 @@ A route with `n: 0` was never called in that run (for example `confirm`, which t
 |---|---|
 | `generator.lag_p99_ms`, `lag_max_ms` | How late the swarm fired requests compared with their schedule. |
 | `generator.generator_bound` | `true` when lag p99 > 100 ms (LOADTEST §3.4): the load generator itself was starved, so the latency numbers measure the laptop, not SLUICE. Never publish SLO numbers from such a run. |
-| `generator.cpu_cores_max/mean`, `goroutines_max` | The swarm's own footprint. |
+| `generator.cpu_cores_max/mean`, `goroutines_max` | The swarm's own footprint (1 s samples; `cpu_samples_invalid` were left out because CPU and wall time could not be read together, ADR 0019). |
+| `generator.cpu_seconds`, `cpu_cores_run_mean`, `cpu_ms_per_1k_requests` | The swarm's whole-run CPU (getrusage), from the first user to the last. Per 1k requests it depends on the request mix: timeouts mean re-dials, which cost more. |
+| `generator.gc_cycles`, `gc_cpu_seconds`, `heap_live_peak_mb`, `pprof` | Go runtime view of the swarm. With `pprof: true` the run directory has the swarm's `cpu.pprof` and `heap.pprof` (`go tool pprof -top cpu.pprof`). |
 | `generator.stats_samples`, `stats_failed` | `/stats` polls used for the inventory series. |
 
 ### Records and audit

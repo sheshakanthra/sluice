@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"math/rand/v2"
 	"net"
@@ -57,12 +58,21 @@ func newTransport(conn string) *http.Transport {
 	return t
 }
 
-// client is one user's view of the API.
+// client is one user's view of the API: a dedicated userConn, or (pooled
+// mode, laptop-friendly) the shared net/http transport.
 type client struct {
-	hc   *http.Client
-	base string // target + /api/v1
+	uc   *userConn    // dedicated mode
+	hc   *http.Client // pooled mode (and tests that use net/http)
+	base string       // target + /api/v1
 	xff  string
 	rec  *Recorder
+}
+
+// close ends a dedicated connection.
+func (c *client) close() {
+	if c.uc != nil {
+		c.uc.Close()
+	}
 }
 
 // result is a finished HTTP exchange.
@@ -138,13 +148,47 @@ func (d *sendDeadline) stop() {
 // do sends one request and records it against its intended start. A
 // cancelled run context is not recorded (the run is over, not the server).
 func (c *client) do(ctx context.Context, q req) result {
-	var rd io.Reader
+	var body []byte
 	if q.body != nil {
 		b, err := json.Marshal(q.body)
 		if err != nil {
 			return result{err: err, oc: transport}
 		}
-		rd = bytes.NewReader(b)
+		body = b
+	}
+	var (
+		ex  exchange
+		err error
+	)
+	if c.uc != nil {
+		ex, err = c.uc.roundTrip(ctx, &q, body, c.xff)
+	} else {
+		ex, err = c.httpDo(ctx, &q, body)
+	}
+	res := result{status: ex.status, body: ex.body, retryAfter: ex.retryAfter}
+	end := time.Now()
+	switch {
+	case ctx.Err() != nil:
+		res.err, res.oc = ctx.Err(), transport
+		return res // run over: not a measurement
+	case err != nil && (errors.Is(err, errCallTimeout) || errors.Is(err, context.DeadlineExceeded) || isTimeout(err)):
+		res.status, res.err, res.oc = 0, err, timedOut
+	case err != nil:
+		res.status, res.err, res.oc = 0, err, transport
+	default:
+		res.oc = classify(res.status)
+	}
+	c.rec.Record(q.rt, q.intended, end, res.status, res.oc)
+	return res
+}
+
+// httpDo is the net/http path (pooled mode). Its timeout is armed when the
+// request gets its connection (sendDeadline), with a hard stop at dial +
+// timeout, so it measures the same span as userConn's socket deadline.
+func (c *client) httpDo(ctx context.Context, q *req, body []byte) (exchange, error) {
+	var rd io.Reader
+	if body != nil {
+		rd = bytes.NewReader(body)
 	}
 	cctx, cancel := context.WithCancelCause(ctx)
 	defer cancel(nil)
@@ -157,9 +201,9 @@ func (c *client) do(ctx context.Context, q req) result {
 	})
 	hr, err := http.NewRequestWithContext(tctx, q.method, c.base+q.path, rd)
 	if err != nil {
-		return result{err: err, oc: transport}
+		return exchange{}, err
 	}
-	if q.body != nil {
+	if body != nil {
 		hr.Header.Set("Content-Type", "application/json")
 	}
 	if q.token != "" {
@@ -170,31 +214,21 @@ func (c *client) do(ctx context.Context, q req) result {
 	}
 	hr.Header.Set("X-Forwarded-For", c.xff)
 	resp, err := c.hc.Do(hr)
-	var res result
+	var ex exchange
 	if err == nil {
-		res.status = resp.StatusCode
-		res.body, err = io.ReadAll(io.LimitReader(resp.Body, maxBody))
+		ex.status = resp.StatusCode
+		ex.body, err = io.ReadAll(io.LimitReader(resp.Body, maxBody))
 		_ = resp.Body.Close()
 		if s := resp.Header.Get("Retry-After"); s != "" {
 			if n, perr := strconv.Atoi(s); perr == nil && n >= 0 {
-				res.retryAfter = time.Duration(n) * time.Second
+				ex.retryAfter = time.Duration(n) * time.Second
 			}
 		}
 	}
-	end := time.Now()
-	switch {
-	case ctx.Err() != nil:
-		res.err, res.oc = ctx.Err(), transport
-		return res // run over: not a measurement
-	case err != nil && (errors.Is(context.Cause(cctx), errCallTimeout) || errors.Is(err, context.DeadlineExceeded) || isTimeout(err)):
-		res.status, res.err, res.oc = 0, err, timedOut
-	case err != nil:
-		res.status, res.err, res.oc = 0, err, transport
-	default:
-		res.oc = classify(res.status)
+	if err != nil && errors.Is(context.Cause(cctx), errCallTimeout) {
+		err = fmt.Errorf("%w: %w", errCallTimeout, err)
 	}
-	c.rec.Record(q.rt, q.intended, end, res.status, res.oc)
-	return res
+	return ex, err
 }
 
 func isTimeout(err error) bool {

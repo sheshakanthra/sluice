@@ -59,6 +59,9 @@ type Options struct {
 	RedisVersion   string
 	UsersPerIP     int
 	ProgressEvery  time.Duration
+	// PProf writes cpu.pprof (whole run) and heap.pprof (at the live-heap
+	// peak) of the swarm process into Out.
+	PProf bool
 	// Audit, when set, runs the auditor on the results after the swarm
 	// (`--audit`); its mode is naive for B0.
 	Audit *audit.Options
@@ -93,6 +96,7 @@ func ParseArgs(args []string, getenv Getenv, stderr io.Writer) (*Options, error)
 	fs.IntVar(&o.APIReplicas, "api-replicas", 3, "API replicas behind the front door (reported)")
 	fs.IntVar(&o.UsersPerIP, "users-per-ip", 10, "users sharing one synthetic X-Forwarded-For IP")
 	fs.DurationVar(&o.ProgressEvery, "progress", 5*time.Second, "progress line interval")
+	fs.BoolVar(&o.PProf, "pprof", false, "write the swarm's own cpu.pprof and heap.pprof into the output directory")
 	runAudit := fs.Bool("audit", false, "run `sluice audit` on the results afterwards (needs DATABASE_URL, MOCKPAY_DATABASE_URL, REDIS_URL, MOCKPAY_API_KEY)")
 	if err := fs.Parse(args); err != nil {
 		return nil, err

@@ -5,7 +5,7 @@ The claim: **50,000 concurrent users on 500 seats → 0 oversells, 0 duplicate c
 ## 1. What "50,000 concurrent users" means here
 Each simulated user is a goroutine with:
 - its own anonymous session (its own `user_id`)
-- its own keep-alive TCP connection (`--conn=dedicated`)
+- its own keep-alive TCP connection (`--conn=dedicated`), driven by the user's own goroutine through a minimal HTTP/1.1 client (`internal/rush/conn.go`) that puts the same bytes on the wire as net/http, with no per-connection goroutines (ADR 0019)
 - its own Idempotency-Keys
 - a complete journey: session → join → wait → claim → hold → order → pay → confirm
 
@@ -62,7 +62,7 @@ at once as NO_SEAT; only a SOLD_OUT answer is SOLD_OUT.
 | Double-submit `/pay` concurrently with the **same** IK | 5% |
 | Client timeout, then retry with the **same** IK (also on 5xx, 429 and `REQUEST_IN_PROGRESS`). Failures back off with full jitter, `U(0, min(30 s, 500 ms × 2^attempt))`, never sooner than the server's last `retry_after` (status) or `Retry-After`. `REQUEST_IN_PROGRESS` waits `max(Retry-After, 500 ms)`. At most 30 attempts per request (ADR 0017) | automatic |
 | Rogue retry with a **new** IK | 1% |
-| Status timeout 2 s, then retry; HTTP timeout 5 s on every other call (a 2 s `/pay` timeout would race the API's 2 s PSP timeout; ADR 0010). Each timeout runs from the moment the request has its connection (`httptrace.GotConn`); the dial has its own 5 s timeout (§3.4) | — |
+| Status timeout 2 s, then retry; HTTP timeout 5 s on every other call (a 2 s `/pay` timeout would race the API's 2 s PSP timeout; ADR 0010). Each timeout runs from the moment the request has its connection (a socket deadline set after the dial in dedicated mode; `httptrace.GotConn` in pooled mode); the dial has its own 5 s timeout (§3.4) | — |
 | Poll interval: the server's `retry_after` × U(1, 1.1), never shorter; `/confirm` polls 1 s → 6 s (×1.5 each), ±20% | ADR 0017 |
 | Each hold attempt (pick → best → fewer) and each `/confirm` poll is a new intent with a **new** IK; a third `OFFER_EXPIRED` ends as NO_SEAT; a declined payment's retry pays with `pm_ok` | ADR 0010 |
 | Synthetic client IP (X-Forwarded-For) | ~10 users per IP (NAT-like) |
@@ -70,11 +70,14 @@ at once as NO_SEAT; only a SOLD_OUT answer is SOLD_OUT.
 ### 3.4 Measurement rules
 - **Client-side latency** with HdrHistogram (1 µs–60 s, 3 significant digits), one histogram per route.
 - **Coordinated-omission safe:** record each request against its *intended* start time, for example the scheduled poll time, not the time it actually went out. If the swarm falls behind schedule, that delay counts as latency.
-- **Timeouts are measured from the actual send, latency from the intended start.** A request's timeout clock starts when it has its connection (`httptrace.GotConn`), so a slow dial or reconnect, or the swarm's own scheduling delay, doesn't make the server look like it timed out. Its latency is still recorded from the intended start, so that delay still counts as latency. A hard stop at 5 s (dial) + the call's timeout bounds a connection that never comes (ADR 0017).
+- **Timeouts are measured from the actual send, latency from the intended start.** A request's timeout clock starts when it has its connection (dedicated: a socket deadline set once the connection is dialled or reused; pooled: `httptrace.GotConn`), so a slow dial or reconnect, or the swarm's own scheduling delay, doesn't make the server look like it timed out. Its latency is still recorded from the intended start, so that delay still counts as latency. A hard stop at 5 s (dial) + the call's timeout bounds a connection that never comes (ADR 0017).
 - Errors and timeouts are recorded at their elapsed time and counted separately. Expected 409/422/429 are counted as business outcomes, not errors.
 - The rush window runs from T0 − 10 s to the last terminal user.
 - Every 1 s the swarm samples `GET /stats/{id}` and records the server-side state for replay.
 - **Self-check:** the swarm reports its own CPU and goroutine count plus its schedule lag p99. If lag p99 > 100 ms, the run is flagged as **generator-bound** and the report must say so.
+  - The 1 s CPU samples bracket the CPU-time read with two wall-clock reads and drop a sample the sampler could not read within 20 ms (`cpu_samples_invalid`). Before this a goroutine descheduled between the two reads produced readings above the core count (12.20 on a 4-core runner, ADR 0019).
+  - Whole-run cost, from the first user to the last: `cpu_seconds`, `cpu_cores_run_mean`, `cpu_ms_per_1k_requests`, `gc_cycles`, `gc_cpu_seconds` (Go runtime estimate) and `heap_live_peak_mb`.
+  - `--pprof` (on in every `task rush*`) writes the swarm's own `cpu.pprof` (whole run) and `heap.pprof` (rewritten at each +10% live-heap peak). `task rush:profile USERS=15000` runs the H mix and prints the top of `cpu.pprof`.
 
 ### 3.5 Outputs (`loadtest/results/<run_id>/`)
 - `summary.json`: the source of every number we publish:
@@ -145,7 +148,7 @@ Scenario env overlays: `deploy/env/rush.b0.env`, `rush.b1.env`, `rush.b2.env` (s
      `sudo sysctl -w net.core.somaxconn=65535 net.ipv4.tcp_max_syn_backlog=65535 net.ipv4.ip_local_port_range="1024 65535" net.ipv4.tcp_tw_reuse=1 fs.file-max=2000000`
   3. `docker compose build` (the images, as a separate timed step).
   4. The scenario's task (`task rush` / `rush:smoke` / `rush:b0` / `rush:b1` / `rush:b2` with `ENV=rush USERS=... RUN_ID=ci-<run id>-<scenario>-<users>`). It starts from a fresh stack, seeds, runs the swarm and then the auditor (`sluice rush --audit`), so there is no separate `stack:up` or `task audit` step (ADR 0015).
-  5. Upload `loadtest/results/<run_id>` as an artifact, plus `runner.md`, `stack.log.gz`, `ps.txt`, `verdict.md`, `docker-stats.csv.gz` and `cpu.md`.
+  5. Upload `loadtest/results/<run_id>` (which includes the swarm's `cpu.pprof` and `heap.pprof`) as an artifact, plus `runner.md`, `stack.log.gz`, `ps.txt`, `verdict.md`, `docker-stats.csv.gz` and `cpu.md`.
   6. Write `runner.md` + `report.md` + `cpu.md` + the verdict to `$GITHUB_STEP_SUMMARY` (public proof on the run page).
   7. Gate with `loadtest/ci/verdict.py`: H/SMOKE/B2 fail on any audit count ≠ 0, a failed or unsettled audit, or unresolved users. B0/B1 fail when the expected bugs are **not** detected (B0: oversold > 0 and duplicate charges > 0; B1: oversold = 0 and duplicate charges > 0) or users are unresolved. Latency SLOs are reported, never gating.
 - **Per-container CPU on every rush.** `loadtest/ci/dockerstats.sh` samples `docker stats --no-stream` in the background from just before the rush until it ends, giving one row per container about every 2–3 s. `loadtest/ci/cpu_summary.py` turns the samples taken while the swarm ran into `cpu.md`: mean, p95 and max cores per container, plus the total. The sampler runs on the same runner and costs a little CPU itself.
