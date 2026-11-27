@@ -9,9 +9,9 @@ Base path `/api/v1`. JSON throughout, UTF-8. Times are RFC 3339 UTC. Money is in
 |---|---|---|---|---|
 | Session | `session` | `sub` = user_id | 24 h | `POST /sessions` |
 | Queue | `queue` | `sub`, `eid`, `tkt` (0 = pre-queue) | until event start | `POST /events/{id}/queue`, refreshed by status |
-| Admission | `admission` | `sub`, `eid` | `ADMISSION_TTL` (hard cap; the server-side lease also ends after `ADMISSION_IDLE_TTL` without a request, or when the checkout ends; `POST /holds` and `POST /orders` then answer 403 `ADMISSION_EXPIRED`) | queue status, once ADMITTED |
+| Admission | `admission` | `sub`, `eid` | `ADMISSION_TTL` (hard cap; the server-side lease also ends after `ADMISSION_IDLE_TTL` without a request, or when the checkout ends; `POST /holds` and `POST /orders` then answer 403 `ADMISSION_EXPIRED`). Past `exp`, a **spend grace** of `HOLD_TTL` lets the token finish or give back what it spent: `POST /orders` for the user's own live hold, `DELETE /holds/{id}`, `DELETE /queue`; `POST /holds` answers 403 `ADMISSION_EXPIRED` (ADR 0018) | queue status, once ADMITTED |
 
-Send it as `Authorization: Bearer <token>`. Every token has `iss=sluice`, `iat`, `exp` and `jti`. The wrong audience or event gives 401 `TOKEN_INVALID`; an expired token gives 401 `TOKEN_EXPIRED`.
+Send it as `Authorization: Bearer <token>`. Every token has `iss=sluice`, `iat`, `exp` and `jti`. The wrong audience or event gives 401 `TOKEN_INVALID`; an expired token gives 401 `TOKEN_EXPIRED` (for an admission token: only once it is past `exp` + `HOLD_TTL`, ADR 0018).
 
 ### 1.2 Idempotency (Stripe-style) on every mutating endpoint marked **IK**
 - Header: `Idempotency-Key: <8–128 chars>`. The client generates it (UUID) once per user intent and reuses it on retries.
@@ -36,7 +36,7 @@ Send it as `Authorization: Bearer <token>`. Every token has `iss=sluice`, `iat`,
 | `IDEMPOTENCY_KEY_REQUIRED` | 400 | IK endpoint without the header |
 | `TOKEN_INVALID` / `TOKEN_EXPIRED` | 401 | |
 | `NOT_ADMITTED` | 403 | Inventory endpoint without a valid admission token (when `QUEUE_ENFORCED`) |
-| `ADMISSION_EXPIRED` | 403 | `POST /holds` or `POST /orders` with a valid admission token whose server-side lease has ended (idle past `ADMISSION_IDLE_TTL`, checkout ended, left the queue, or past the cap). The client may rejoin (`POST /queue?rejoin=true`, two-rejoin limit). ADR 0010 addendum part 3 |
+| `ADMISSION_EXPIRED` | 403 | `POST /holds` or `POST /orders` with a valid admission token whose server-side lease has ended (idle past `ADMISSION_IDLE_TTL`, checkout ended, left the queue, or past the cap). Past the cap, `POST /orders` still succeeds for the caller's own live (ACTIVE, unexpired) hold, within `HOLD_TTL` of the cap (ADR 0018). The client may rejoin (`POST /queue?rejoin=true`, two-rejoin limit). ADR 0010 addendum part 3 |
 | `NOT_FOUND` | 404 | |
 | `SEATS_TAKEN` | 409 | Some requested seats are unavailable (`taken[]`) |
 | `INSUFFICIENT_SEATS` | 409 | Fewer seats left than the quantity asked for (`available`) |

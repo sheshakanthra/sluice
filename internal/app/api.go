@@ -98,6 +98,9 @@ func APIHandler(ctx context.Context, d Deps) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A hold taken just before the admission's cap lives HOLD_TTL: the token
+	// may still finish (order) or give back (release, leave) that long (ADR 0018).
+	keyring = keyring.WithSpendGrace(d.Config.HoldTTL)
 	if d.Config.RateLimitsEnabled {
 		wrap, err := rateLimits(d, keyring)
 		if err != nil {

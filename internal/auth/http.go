@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -66,21 +67,50 @@ func WriteError(w http.ResponseWriter, r *http.Request, err error) {
 // Require wraps next so it only runs with a valid token of one of auds. A
 // missing token gives missingCode (TOKEN_INVALID, or NOT_ADMITTED on
 // inventory routes when the queue is enforced). An admission token renews
-// its lease (best effort; the lease state does not change the answer).
+// its lease (best effort; the lease state does not change the answer). An
+// admission token past its cap but inside the spend grace is accepted
+// without a renewal: these routes give back (DELETE /holds, DELETE /queue).
 func (k *Keyring) Require(missingCode httpx.Code, next http.Handler, auds ...Audience) http.Handler {
-	return k.require(missingCode, next, false, auds)
+	return k.require(missingCode, next, gateAny, auds)
 }
 
-// RequireLive is Require for the routes that spend an admission (POST
-// /holds, POST /orders): an admission token must also have a live
-// server-side lease. A lapsed lease gives 403 ADMISSION_EXPIRED (the
-// client may rejoin); a failed check gives 503 DEPENDENCY_UNAVAILABLE, so
-// the gate never fails open. Session tokens (direct mode) are not checked.
+// RequireLive is Require for POST /holds, which spends an admission: an
+// admission token must also have a live server-side lease. A lapsed lease,
+// or a token past its cap (inside the spend grace), gives 403
+// ADMISSION_EXPIRED (the client may rejoin); a failed check gives 503
+// DEPENDENCY_UNAVAILABLE, so the gate never fails open. Session tokens
+// (direct mode) are not checked.
 func (k *Keyring) RequireLive(missingCode httpx.Code, next http.Handler, auds ...Audience) http.Handler {
-	return k.require(missingCode, next, true, auds)
+	return k.require(missingCode, next, gateLive, auds)
 }
 
-func (k *Keyring) require(missingCode httpx.Code, next http.Handler, live bool, auds []Audience) http.Handler {
+// RequireHoldBacked is RequireLive for POST /orders, which spends a hold
+// the admission already paid for (ADR 0018). Before the cap it is
+// RequireLive. Past the cap (token inside the spend grace) the request goes
+// on marked AdmissionPastCap, and the handler must accept it only for the
+// user's own live hold, else answer 403 ADMISSION_EXPIRED.
+func (k *Keyring) RequireHoldBacked(missingCode httpx.Code, next http.Handler, auds ...Audience) http.Handler {
+	return k.require(missingCode, next, gateHoldBacked, auds)
+}
+
+type gate int
+
+const (
+	gateAny gate = iota
+	gateLive
+	gateHoldBacked
+)
+
+type pastCapKey struct{}
+
+// AdmissionPastCap reports whether RequireHoldBacked let the request
+// through on an admission token past its cap.
+func AdmissionPastCap(ctx context.Context) bool {
+	v, _ := ctx.Value(pastCapKey{}).(bool)
+	return v
+}
+
+func (k *Keyring) require(missingCode httpx.Code, next http.Handler, g gate, auds []Audience) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tok, err := Bearer(r)
 		if errors.Is(err, ErrNoToken) {
@@ -91,9 +121,23 @@ func (k *Keyring) require(missingCode httpx.Code, next http.Handler, live bool, 
 			WriteError(w, r, err)
 			return
 		}
-		var c Claims
+		var (
+			c       Claims
+			pastCap bool
+		)
 		for _, aud := range auds {
-			if c, err = k.Verify(tok, aud); err == nil || errors.Is(err, ErrTokenExpired) {
+			if c, err = k.Verify(tok, aud); err == nil {
+				break
+			}
+			if errors.Is(err, ErrTokenExpired) {
+				// The JWT lifetime check runs before the audience check, so an
+				// expired admission token reports "expired" for any audience:
+				// try the spend grace whenever the route accepts admission.
+				if slices.Contains(auds, AudAdmission) {
+					if gc, ok := k.verifyPastExp(tok); ok {
+						c, err, pastCap = gc, nil, true
+					}
+				}
 				break
 			}
 		}
@@ -101,13 +145,22 @@ func (k *Keyring) require(missingCode httpx.Code, next http.Handler, live bool, 
 			WriteError(w, r, err)
 			return
 		}
-		if c.Audience == AudAdmission && k.touch != nil {
-			st := k.touch(r.Context(), c)
-			if live && !gatePasses(w, r, st) {
+		ctx := r.Context()
+		switch {
+		case pastCap && g == gateLive:
+			httpx.WriteError(w, r, httpx.CodeAdmissionExpired,
+				"your admission reached its time limit; rejoin the queue (POST /queue?rejoin=true)")
+			return
+		case pastCap && g == gateHoldBacked:
+			ctx = context.WithValue(ctx, pastCapKey{}, true)
+		case pastCap: // give-back route: no renewal past the cap
+		case c.Audience == AudAdmission && k.touch != nil:
+			st := k.touch(ctx, c)
+			if g != gateAny && !gatePasses(w, r, st) {
 				return
 			}
 		}
-		next.ServeHTTP(w, r.WithContext(WithClaims(r.Context(), c)))
+		next.ServeHTTP(w, r.WithContext(WithClaims(ctx, c)))
 	})
 }
 

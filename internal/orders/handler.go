@@ -13,6 +13,7 @@ import (
 
 	"github.com/sheshakanthra/sluice/internal/auth"
 	"github.com/sheshakanthra/sluice/internal/db"
+	"github.com/sheshakanthra/sluice/internal/db/gen"
 	"github.com/sheshakanthra/sluice/internal/httpx"
 	"github.com/sheshakanthra/sluice/internal/inventory"
 	"github.com/sheshakanthra/sluice/internal/payments"
@@ -74,7 +75,7 @@ func RegisterRoutes(rt *httpx.Router, d HandlerDeps) {
 	session := func(route string, h http.HandlerFunc, idem bool) {
 		rt.Handle(route, d.Keys.Require(httpx.CodeTokenInvalid, handler(route, h, idem), auth.AudSession))
 	}
-	rt.Handle(RouteCreate, d.Keys.RequireLive(missing, handler(RouteCreate, d.create, true), createAuds...))
+	rt.Handle(RouteCreate, d.Keys.RequireHoldBacked(missing, handler(RouteCreate, d.create, true), createAuds...))
 	session(RoutePay, d.pay, true)
 	session(RouteNewAttempt, d.newAttempt, true)
 	session(RouteConfirm, d.confirm, true)
@@ -116,6 +117,14 @@ func (d HandlerDeps) create(w http.ResponseWriter, r *http.Request) {
 		h, err := d.Svc.q.GetHold(r.Context(), b.HoldID)
 		if err == nil && h.EventID != c.EventID {
 			httpx.WriteError(w, r, httpx.CodeTokenInvalid, "the admission token is for another event")
+			return
+		}
+		// Past the admission's cap (ADR 0018): the token may only turn the
+		// user's own live hold into an order, the hold it already paid for.
+		if auth.AdmissionPastCap(r.Context()) &&
+			(err != nil || h.UserID != c.Subject || h.Status != gen.HoldStatusACTIVE || !h.ExpiresAt.After(d.Now())) {
+			httpx.WriteError(w, r, httpx.CodeAdmissionExpired,
+				"your admission reached its time limit and this hold is not live; rejoin the queue (POST /queue?rejoin=true)")
 			return
 		}
 	}

@@ -75,6 +75,13 @@ type Keyring struct {
 	// lets through with a valid admission token (the queue's sliding
 	// admission lease): it renews the lease and reports its state.
 	touch AdmissionCheck
+	// spendGrace is how long past its exp (the admission's hard cap) an
+	// admission token is still accepted, and only to finish or give back
+	// what it already spent: POST /orders for the user's own live hold,
+	// DELETE /holds/{id}, DELETE /queue. POST /holds answers 403
+	// ADMISSION_EXPIRED inside the grace. It is HOLD_TTL: a hold taken just
+	// before the cap lives that long (ADR 0018). 0 disables it.
+	spendGrace time.Duration
 }
 
 // AdmissionState is what the server-side admission lease check found
@@ -104,6 +111,15 @@ type AdmissionCheck func(ctx context.Context, c Claims) AdmissionState
 func (k *Keyring) WithAdmissionTouch(f AdmissionCheck) *Keyring {
 	c := *k
 	c.touch = f
+	return &c
+}
+
+// WithSpendGrace returns a copy of k that accepts admission tokens up to d
+// past their exp on the routes that finish or give back an admission's
+// spend (ADR 0018).
+func (k *Keyring) WithSpendGrace(d time.Duration) *Keyring {
+	c := *k
+	c.spendGrace = max(d, 0)
 	return &c
 }
 
@@ -167,12 +183,26 @@ func (k *Keyring) issue(aud Audience, subject, eventID uuid.UUID, ticket *int64,
 
 // Verify checks the signature, issuer, audience and lifetime of token.
 func (k *Keyring) Verify(token string, aud Audience) (Claims, error) {
+	return k.verify(token, aud, ClockSkew)
+}
+
+// verifyPastExp verifies an admission token that Verify found expired,
+// accepting it up to spendGrace past exp. ok is false outside the grace.
+func (k *Keyring) verifyPastExp(token string) (Claims, bool) {
+	if k.spendGrace <= 0 {
+		return Claims{}, false
+	}
+	c, err := k.verify(token, AudAdmission, ClockSkew+k.spendGrace)
+	return c, err == nil
+}
+
+func (k *Keyring) verify(token string, aud Audience, leeway time.Duration) (Claims, error) {
 	var wc wireClaims
 	_, err := jwt.ParseWithClaims(token, &wc, k.key,
 		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
 		jwt.WithIssuer(Issuer), jwt.WithAudience(string(aud)),
 		jwt.WithExpirationRequired(), jwt.WithIssuedAt(),
-		jwt.WithLeeway(ClockSkew), jwt.WithTimeFunc(k.now),
+		jwt.WithLeeway(leeway), jwt.WithTimeFunc(k.now),
 	)
 	if errors.Is(err, jwt.ErrTokenExpired) {
 		return Claims{}, ErrTokenExpired
